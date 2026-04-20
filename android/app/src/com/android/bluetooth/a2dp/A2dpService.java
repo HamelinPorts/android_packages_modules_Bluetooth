@@ -140,6 +140,10 @@ public class A2dpService extends ConnectableProfile {
         Log.d(TAG, "A2DP offload flag set to " + mA2dpOffloadEnabled);
 
         mAudioManager.registerAudioDeviceCallback(mAudioManagerAudioDeviceCallback, mHandler);
+
+        // SM-X205 dual-A2DP: give the coordinator a Context so it can read
+        // Settings.Global.a2dp_dup_active written by the dualaudio-app.
+        DualAudioCoordinator.getInstance().attachContext(this);
     }
 
     public static boolean isEnabled() {

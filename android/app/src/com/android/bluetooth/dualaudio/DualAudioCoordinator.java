@@ -16,9 +16,11 @@
 package com.android.bluetooth.dualaudio;
 
 import android.bluetooth.BluetoothDevice;
+import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemProperties;
+import android.provider.Settings;
 import android.util.Log;
 
 import com.android.bluetooth.flags.Flags;
@@ -58,14 +60,36 @@ public final class DualAudioCoordinator {
 
     private DualAudioCoordinator() {}
 
+    /**
+     * Optional Context used to reach the Settings.Global value written by the
+     * user-facing dualaudio-app. If null, the Settings.Global check is
+     * skipped (falls back to aconfig / sysprop).
+     */
+    private volatile Context mContext;
+
+    /** Called by A2dpService to pass us a Context for Settings.Global lookups. */
+    public void attachContext(Context context) {
+        mContext = context.getApplicationContext();
+    }
+
     public boolean isEnabled() {
-        // Production path: aconfig flag. PoC escape hatch matches the C++
-        // side (btif_av_dual.cc Enabled()) — sysprop until the release
-        // config ships the aconfig flag in ENABLED state or the custom
-        // app (Wk 5) flips it via device_config override.
+        // (1) aconfig flag — upstream-ready source of truth.
         if (Flags.a2dpDupActive()) {
             return true;
         }
+        // (2) user-facing toggle written by dualaudio-app (Wk 5).
+        //     Settings.Global.a2dp_dup_active: int 0/1.
+        Context ctx = mContext;
+        if (ctx != null) {
+            try {
+                if (Settings.Global.getInt(ctx.getContentResolver(), "a2dp_dup_active", 0) != 0) {
+                    return true;
+                }
+            } catch (Throwable t) {
+                // getContentResolver failure during early boot — fall through.
+            }
+        }
+        // (3) PoC sysprop escape hatch. Matches btif_av_dual.cc Enabled().
         return SystemProperties.getBoolean("persist.bluetooth.a2dp.dup_active", false);
     }
 
