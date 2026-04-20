@@ -18,6 +18,13 @@
 #include <bluetooth/types/address.h>
 #include <hardware/bluetooth.h>  // bt_status_t
 
+// Additive exports from btif_av.cc for the overlay's use. No existing
+// behavior changes; these wrap the file-static dispatch function and
+// peer lookup.
+void btif_av_source_request_start_stream(const RawAddress& peer_address);
+void btif_av_source_request_suspend_stream(const RawAddress& peer_address);
+bool btif_av_source_is_peer_connected(const RawAddress& peer_address);
+
 namespace bluetooth::dual_audio {
 
 // Global master switch. Returns true only when the feature is active
