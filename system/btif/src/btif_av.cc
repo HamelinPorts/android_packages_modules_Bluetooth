@@ -3812,6 +3812,22 @@ static void btif_av_sink_dispatch_sm_event(const RawAddress& peer_address,
                                    peer_address, kBtaHandleUnknown, btif_av_event));
 }
 
+// SM-X205 dual-A2DP: thin wrappers exposing per-peer BTIF-AV event dispatch
+// to the overlay module (btif_av_dual.cc). Additive — no change to existing
+// dispatch behavior.
+void btif_av_source_request_start_stream(const RawAddress& peer_address) {
+  btif_av_source_dispatch_sm_event(peer_address, BTIF_AV_START_STREAM_REQ_EVT);
+}
+
+void btif_av_source_request_suspend_stream(const RawAddress& peer_address) {
+  btif_av_source_dispatch_sm_event(peer_address, BTIF_AV_SUSPEND_STREAM_REQ_EVT);
+}
+
+bool btif_av_source_is_peer_connected(const RawAddress& peer_address) {
+  BtifAvPeer* peer = btif_av_source.FindPeer(peer_address);
+  return peer != nullptr && peer->IsConnected();
+}
+
 bt_status_t btif_av_source_execute_service(bool enable) {
   log::info("enable={}", enable);
 
