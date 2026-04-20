@@ -27,6 +27,7 @@
 #include "btif/include/dual_audio_bridge.h"
 
 #include "btif/include/btif_a2dp_source_dual.h"
+#include "btif/include/btif_av_co.h"
 
 #include <bluetooth/log.h>
 #include <bluetooth/types/address.h>
@@ -38,6 +39,7 @@
 #include <vector>
 
 #include "osi/include/properties.h"
+#include "stack/include/a2dp_codec_api.h"
 
 namespace {
 
@@ -182,6 +184,36 @@ void OnPrimaryStarted(const RawAddress& primary) {
   }
 }
 
+// Wk 7: log codec compatibility between the current primary and the
+// incoming secondary. Stock AOSP's bta_av_dup_audio_buf (bta_av_main.cc)
+// duplicates the primary's encoded frames into every co_started SCB's
+// a2dp_list. That is correct only when the peer speaks the same codec.
+// This helper emits a clear warning when it won't — Wk 8 replaces the
+// warning with an actual per-peer encoder.
+static void LogCodecCompat(const RawAddress& secondary) {
+  A2dpCodecConfig* primary_codec = bta_av_get_a2dp_current_codec();
+  A2dpCodecConfig* secondary_codec = bta_av_get_a2dp_peer_current_codec(secondary);
+  if (primary_codec == nullptr) {
+    log::warn("codec-compat: no active primary codec (peer={})", secondary);
+    return;
+  }
+  if (secondary_codec == nullptr) {
+    log::warn("codec-compat: no codec negotiated for secondary {} — stock dup "
+              "will forward primary's {} frames blindly",
+              secondary, primary_codec->name());
+    return;
+  }
+  if (primary_codec->codecIndex() == secondary_codec->codecIndex()) {
+    log::info("codec-compat MATCH: both={} (secondary={})",
+              primary_codec->name(), secondary);
+    return;
+  }
+  log::warn("codec-compat MISMATCH: primary={} secondary={} (peer={}). "
+            "Secondary will receive primary-encoded frames — audio will be "
+            "garbage until Wk 8 per-peer encoder lands.",
+            primary_codec->name(), secondary_codec->name(), secondary);
+}
+
 bt_status_t ForceStartSecondaryPeer(const RawAddress& peer) {
   if (!Enabled()) {
     log::warn("ForceStartSecondaryPeer({}) : dup_active sysprop is off", peer);
@@ -195,6 +227,7 @@ bt_status_t ForceStartSecondaryPeer(const RawAddress& peer) {
     log::error("ForceStartSecondaryPeer({}) : peer not connected", peer);
     return BT_STATUS_DEVICE_NOT_FOUND;
   }
+  LogCodecCompat(peer);
   // Mark the peer BEFORE dispatching the start so that the BTA_AV_START_EVT
   // handler's AllowNonActiveStart() check finds us in the set.
   ForcedSecondaryRegistry::Get().Add(peer);
