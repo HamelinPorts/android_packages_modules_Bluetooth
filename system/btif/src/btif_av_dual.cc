@@ -35,6 +35,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "osi/include/properties.h"
+
 namespace {
 
 // Hash/eq for unordered_set<RawAddress>.
@@ -103,9 +105,18 @@ private:
 namespace bluetooth::dual_audio {
 
 bool Enabled() {
-  // Wk 3: aconfig flag (migrated from the Wk 2 sysprop). Wired via the
-  // `a2dp_dup_active` flag in flags/a2dp.aconfig.
-  return com_android_bluetooth_flags_a2dp_dup_active();
+  // Production path: aconfig flag `a2dp_dup_active` (flags/a2dp.aconfig).
+  // This is the upstream-submittable mechanism.
+  if (com_android_bluetooth_flags_a2dp_dup_active()) {
+    return true;
+  }
+  // PoC escape hatch: the aconfig flag is baked read-only per release
+  // config; on a daily-driver build the flag is DISABLED by default.
+  // Honour the legacy sysprop so the user-facing toggle works without
+  // rebuilding the APEX. Wk 5 replaces this with the custom app calling
+  // into device_config override directly, and the sysprop path gets
+  // dropped once the release config carries the flag.
+  return osi_property_get_bool("persist.bluetooth.a2dp.dup_active", false);
 }
 
 bool AllowNonActiveStart(const RawAddress& peer) {

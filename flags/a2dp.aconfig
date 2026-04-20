@@ -18,6 +18,10 @@ flag {
     namespace: "bluetooth"
     description: "Allow a second A2DP peer to stream simultaneously with the primary (SM-X205 overlay)"
     bug: "0"
+    # PoC: default ENABLED on this device. Upstream-ready flag machinery
+    # (device_config, aflags) controls the runtime behaviour once the
+    # user-facing dualaudio app is in place (Wk 5).
+    is_fixed_read_only: false
     metadata {
         purpose: PURPOSE_FEATURE
     }
