@@ -184,34 +184,37 @@ void OnPrimaryStarted(const RawAddress& primary) {
   }
 }
 
-// Wk 7: log codec compatibility between the current primary and the
+// Wk 7/8a: codec compatibility between the current primary and the
 // incoming secondary. Stock AOSP's bta_av_dup_audio_buf (bta_av_main.cc)
 // duplicates the primary's encoded frames into every co_started SCB's
 // a2dp_list. That is correct only when the peer speaks the same codec.
-// This helper emits a clear warning when it won't — Wk 8 replaces the
-// warning with an actual per-peer encoder.
-static void LogCodecCompat(const RawAddress& secondary) {
+// Without a per-peer encoder (Wk 8b) mismatched peers would receive
+// garbage and the primary destabilizes from the contention — Wk 8a
+// uses this to refuse the promotion.
+enum class CodecCompat { MATCH, MISMATCH, UNKNOWN };
+
+static CodecCompat CheckCodecCompat(const RawAddress& secondary) {
   A2dpCodecConfig* primary_codec = bta_av_get_a2dp_current_codec();
   A2dpCodecConfig* secondary_codec = bta_av_get_a2dp_peer_current_codec(secondary);
   if (primary_codec == nullptr) {
     log::warn("codec-compat: no active primary codec (peer={})", secondary);
-    return;
+    return CodecCompat::UNKNOWN;
   }
   if (secondary_codec == nullptr) {
-    log::warn("codec-compat: no codec negotiated for secondary {} — stock dup "
-              "will forward primary's {} frames blindly",
+    log::warn("codec-compat: no codec negotiated for secondary {} "
+              "(primary={})",
               secondary, primary_codec->name());
-    return;
+    return CodecCompat::UNKNOWN;
   }
   if (primary_codec->codecIndex() == secondary_codec->codecIndex()) {
     log::info("codec-compat MATCH: both={} (secondary={})",
               primary_codec->name(), secondary);
-    return;
+    return CodecCompat::MATCH;
   }
-  log::warn("codec-compat MISMATCH: primary={} secondary={} (peer={}). "
-            "Secondary will receive primary-encoded frames — audio will be "
-            "garbage until Wk 8 per-peer encoder lands.",
+  log::warn("codec-compat MISMATCH: primary={} secondary={} (peer={}) — "
+            "refusing force-start. Wk 8b per-peer encoder will lift this.",
             primary_codec->name(), secondary_codec->name(), secondary);
+  return CodecCompat::MISMATCH;
 }
 
 bt_status_t ForceStartSecondaryPeer(const RawAddress& peer) {
@@ -227,7 +230,9 @@ bt_status_t ForceStartSecondaryPeer(const RawAddress& peer) {
     log::error("ForceStartSecondaryPeer({}) : peer not connected", peer);
     return BT_STATUS_DEVICE_NOT_FOUND;
   }
-  LogCodecCompat(peer);
+  if (CheckCodecCompat(peer) == CodecCompat::MISMATCH) {
+    return BT_STATUS_UNSUPPORTED;
+  }
   // Mark the peer BEFORE dispatching the start so that the BTA_AV_START_EVT
   // handler's AllowNonActiveStart() check finds us in the set.
   ForcedSecondaryRegistry::Get().Add(peer);
