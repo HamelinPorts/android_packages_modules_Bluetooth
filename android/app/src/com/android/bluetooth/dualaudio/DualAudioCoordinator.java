@@ -18,6 +18,7 @@ package com.android.bluetooth.dualaudio;
 import android.bluetooth.BluetoothDevice;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemProperties;
 import android.util.Log;
 
 import com.android.bluetooth.flags.Flags;
@@ -58,7 +59,14 @@ public final class DualAudioCoordinator {
     private DualAudioCoordinator() {}
 
     public boolean isEnabled() {
-        return Flags.a2dpDupActive();
+        // Production path: aconfig flag. PoC escape hatch matches the C++
+        // side (btif_av_dual.cc Enabled()) — sysprop until the release
+        // config ships the aconfig flag in ENABLED state or the custom
+        // app (Wk 5) flips it via device_config override.
+        if (Flags.a2dpDupActive()) {
+            return true;
+        }
+        return SystemProperties.getBoolean("persist.bluetooth.a2dp.dup_active", false);
     }
 
     public Set<BluetoothDevice> getSecondaries() {
