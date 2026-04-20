@@ -24,6 +24,11 @@
 void btif_av_source_request_start_stream(const RawAddress& peer_address);
 void btif_av_source_request_suspend_stream(const RawAddress& peer_address);
 bool btif_av_source_is_peer_connected(const RawAddress& peer_address);
+// Returns true if the peer is connected and its BTIF state machine is in
+// "Opened" (i.e. not "Started"/"Streaming"). Used by DualAudioCoordinator
+// to poll for SUSPEND-complete after a flip before force-starting as
+// secondary.
+bool btif_av_source_is_peer_in_open_state(const RawAddress& peer_address);
 
 namespace bluetooth::dual_audio {
 

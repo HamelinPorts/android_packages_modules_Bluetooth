@@ -18,8 +18,9 @@ package com.android.bluetooth.dualaudio;
 import android.bluetooth.BluetoothDevice;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemProperties;
 import android.util.Log;
+
+import com.android.bluetooth.flags.Flags;
 
 import java.util.HashSet;
 import java.util.Objects;
@@ -28,17 +29,15 @@ import java.util.Set;
 public final class DualAudioCoordinator {
     private static final String TAG = "DualAudioCoordinator";
 
-    // Wk 2: sysprop gate. Wk 3 migrates to aconfig.
-    private static final String DUP_ACTIVE_SYSPROP =
-            "persist.bluetooth.a2dp.dup_active";
-
-    // Wk 2: delay before firing force-start on the demoted peer. This
-    // lets the in-flight AVDTP_SUSPEND (from native setActiveDevice()
-    // → btif_a2dp_source_restart_session) complete before we request a
-    // new START on the same peer. Observed SUSPEND latency is ~40 ms;
-    // 400 ms is the conservative PoC value. Wk 3 replaces with event-
-    // driven on BTA_AV_SUSPEND_EVT.
-    private static final long FORCE_START_DELAY_MS = 400L;
+    // Wk 3: poll the peer's post-SUSPEND state instead of a fixed 400 ms
+    // delay. Each retry queries btif_av_source_is_peer_in_open_state();
+    // as soon as the peer is OPEN (SUSPEND landed), force-start fires.
+    //
+    // Observed SUSPEND latency: ~40 ms on UWE5622. Retry interval 50 ms;
+    // cap 10 retries (= 500 ms absolute bound, same ceiling as the Wk 2
+    // magic number but deterministic and typically 3-5× faster).
+    private static final long FORCE_START_RETRY_INTERVAL_MS = 50L;
+    private static final int FORCE_START_MAX_RETRIES = 10;
 
     private static final DualAudioCoordinator INSTANCE = new DualAudioCoordinator();
 
@@ -59,7 +58,7 @@ public final class DualAudioCoordinator {
     private DualAudioCoordinator() {}
 
     public boolean isEnabled() {
-        return SystemProperties.getBoolean(DUP_ACTIVE_SYSPROP, false);
+        return Flags.a2dpDupActive();
     }
 
     public Set<BluetoothDevice> getSecondaries() {
@@ -88,10 +87,40 @@ public final class DualAudioCoordinator {
             mSecondaries.add(from);
         }
         Log.i(TAG, "onActiveDeviceChanged: demoting " + from + " → secondary; new primary " + to
-                + "; scheduling force-start in " + FORCE_START_DELAY_MS + "ms");
+                + "; polling for SUSPEND-complete (max "
+                + (FORCE_START_RETRY_INTERVAL_MS * FORCE_START_MAX_RETRIES) + " ms)");
 
-        final BluetoothDevice preserved = from;
-        mHandler.postDelayed(() -> tryForceStartSecondary(preserved), FORCE_START_DELAY_MS);
+        pollAndForceStart(from, FORCE_START_MAX_RETRIES);
+    }
+
+    /**
+     * Bounded poll: check whether the demoted peer has finished AVDTP_SUSPEND
+     * (native returns OPEN state). As soon as it has, fire the force-start.
+     * If max retries exhaust, fire anyway — fallback matches Wk 2 behavior.
+     */
+    private void pollAndForceStart(BluetoothDevice device, int retriesLeft) {
+        synchronized (mLock) {
+            if (!mSecondaries.contains(device)) {
+                Log.d(TAG, "pollAndForceStart: " + device
+                        + " removed from secondary set; aborting");
+                return;
+            }
+        }
+        if (mNativeInterface.isPeerInOpenState(device)) {
+            Log.i(TAG, "pollAndForceStart: " + device + " is OPEN; dispatching force-start"
+                    + " (retries used: " + (FORCE_START_MAX_RETRIES - retriesLeft) + ")");
+            tryForceStartSecondary(device);
+            return;
+        }
+        if (retriesLeft <= 0) {
+            Log.w(TAG, "pollAndForceStart: " + device
+                    + " still not OPEN after max retries; dispatching anyway");
+            tryForceStartSecondary(device);
+            return;
+        }
+        mHandler.postDelayed(
+                () -> pollAndForceStart(device, retriesLeft - 1),
+                FORCE_START_RETRY_INTERVAL_MS);
     }
 
     /** Explicit API for testing / future Quick Settings tile. */

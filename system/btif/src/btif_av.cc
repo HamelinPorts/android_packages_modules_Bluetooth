@@ -3828,6 +3828,12 @@ bool btif_av_source_is_peer_connected(const RawAddress& peer_address) {
   return peer != nullptr && peer->IsConnected();
 }
 
+bool btif_av_source_is_peer_in_open_state(const RawAddress& peer_address) {
+  BtifAvPeer* peer = btif_av_source.FindPeer(peer_address);
+  return peer != nullptr && peer->IsConnected() &&
+         peer->StateMachine().StateId() == BtifAvStateMachine::kStateOpened;
+}
+
 bt_status_t btif_av_source_execute_service(bool enable) {
   log::info("enable={}", enable);
 

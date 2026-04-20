@@ -33,6 +33,11 @@ public class DualAudioNativeInterface {
         return isEnabledNative();
     }
 
+    public boolean isPeerInOpenState(BluetoothDevice device) {
+        Objects.requireNonNull(device);
+        return isPeerInOpenStateNative(getByteAddress(device));
+    }
+
     private static byte[] getByteAddress(BluetoothDevice device) {
         return Utils.getBytesFromAddress(device.getAddress());
     }
@@ -42,4 +47,6 @@ public class DualAudioNativeInterface {
     private native boolean forceStopSecondaryPeerNative(byte[] address);
 
     private native boolean isEnabledNative();
+
+    private native boolean isPeerInOpenStateNative(byte[] address);
 }
