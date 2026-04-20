@@ -17,6 +17,7 @@ package com.android.bluetooth.dualaudio;
 
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
+import android.database.ContentObserver;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemProperties;
@@ -70,6 +71,22 @@ public final class DualAudioCoordinator {
     /** Called by A2dpService to pass us a Context for Settings.Global lookups. */
     public void attachContext(Context context) {
         mContext = context.getApplicationContext();
+        // Observe Settings.Global.a2dp_dup_active. When the user toggles OFF
+        // via the dualaudio-app, actively tear down any running secondary
+        // streams so the behavior matches the UI immediately.
+        try {
+            mContext.getContentResolver().registerContentObserver(
+                    Settings.Global.getUriFor("a2dp_dup_active"),
+                    false,
+                    new ContentObserver(mHandler) {
+                        @Override
+                        public void onChange(boolean selfChange) {
+                            onEnableMayHaveChanged();
+                        }
+                    });
+        } catch (Throwable t) {
+            Log.w(TAG, "registerContentObserver failed", t);
+        }
     }
 
     public boolean isEnabled() {
@@ -77,13 +94,17 @@ public final class DualAudioCoordinator {
         if (Flags.a2dpDupActive()) {
             return true;
         }
-        // (2) user-facing toggle written by dualaudio-app (Wk 5).
-        //     Settings.Global.a2dp_dup_active: int 0/1.
+        // (2) user-facing toggle (Wk 5). Tri-state:
+        //     - 1  → enabled
+        //     - 0  → explicitly disabled (overrides sysprop fallback)
+        //     - -1 / unset → fall through to sysprop
         Context ctx = mContext;
         if (ctx != null) {
             try {
-                if (Settings.Global.getInt(ctx.getContentResolver(), "a2dp_dup_active", 0) != 0) {
-                    return true;
+                int explicit = Settings.Global.getInt(ctx.getContentResolver(),
+                        "a2dp_dup_active", -1);
+                if (explicit >= 0) {
+                    return explicit == 1;
                 }
             } catch (Throwable t) {
                 // getContentResolver failure during early boot — fall through.
@@ -91,6 +112,26 @@ public final class DualAudioCoordinator {
         }
         // (3) PoC sysprop escape hatch. Matches btif_av_dual.cc Enabled().
         return SystemProperties.getBoolean("persist.bluetooth.a2dp.dup_active", false);
+    }
+
+    /**
+     * Called when the enable state may have changed (e.g. user toggled
+     * Settings.Global via the dualaudio-app). If the feature is now
+     * disabled, immediately stop all tracked secondaries.
+     */
+    private void onEnableMayHaveChanged() {
+        if (isEnabled()) {
+            return;
+        }
+        Log.i(TAG, "onEnableMayHaveChanged: now disabled, tearing down secondaries");
+        Set<BluetoothDevice> snapshot;
+        synchronized (mLock) {
+            snapshot = new HashSet<>(mSecondaries);
+            mSecondaries.clear();
+        }
+        for (BluetoothDevice d : snapshot) {
+            mNativeInterface.forceStopSecondaryPeer(d);
+        }
     }
 
     public Set<BluetoothDevice> getSecondaries() {
