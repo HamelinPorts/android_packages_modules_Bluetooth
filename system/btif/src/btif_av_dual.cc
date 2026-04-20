@@ -33,6 +33,7 @@
 
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -78,6 +79,14 @@ public:
     return !peers_.empty();
   }
 
+  // Returns a snapshot of the peer set. Locks are released before the
+  // caller uses the copy, avoiding deadlock if the caller re-enters
+  // this registry from within its iteration.
+  std::vector<RawAddress> Snapshot() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {peers_.begin(), peers_.end()};
+  }
+
   void Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     peers_.clear();
@@ -118,14 +127,46 @@ bool AllowMultiStreamWrites() {
 }
 
 void OnPrimaryActiveDeviceChanged(const RawAddress& from, const RawAddress& to) {
-  // Wk 2: when the primary flips away from `from`, we don't need to do
-  // anything here because DualAudioCoordinator.java is also hooked and
-  // orchestrates the force-start on the demoted peer.
-  //
-  // In Wk 3 this will become the event-driven anchor: subscribe to
-  // BTA_AV_SUSPEND_EVT for `from` and dispatch force-start when it
-  // completes (replaces the Handler.postDelayed(400) race workaround).
+  // Orchestration lives in DualAudioCoordinator.java (which polls via
+  // is_peer_in_open_state for the SUSPEND-complete moment, Wk 3).
+  // This C++-side notification is currently diagnostic only.
   log::info("primary active device: {} -> {}", from, to);
+}
+
+void OnPrimaryStarted(const RawAddress& primary) {
+  // Wk 4 (2a) — auto-rejoin. The primary just entered STARTED. For every
+  // peer registered as a forced secondary, re-issue force-start if it's
+  // not already streaming. This covers the pause/resume case: both peers
+  // drop to OPEN when media pauses; the stock path resumes only the
+  // primary on resume; we drive secondaries back to STARTED.
+  if (!Enabled()) {
+    return;
+  }
+  auto secondaries = ForcedSecondaryRegistry::Get().Snapshot();
+  if (secondaries.empty()) {
+    return;
+  }
+  for (const RawAddress& peer : secondaries) {
+    if (peer == primary) {
+      // Shouldn't happen (active peer shouldn't be in the secondary set),
+      // but skip defensively.
+      continue;
+    }
+    if (!btif_av_source_is_peer_connected(peer)) {
+      // Clean up stale entries.
+      log::info("OnPrimaryStarted: secondary {} no longer connected, dropping", peer);
+      ForcedSecondaryRegistry::Get().Remove(peer);
+      continue;
+    }
+    if (!btif_av_source_is_peer_in_open_state(peer)) {
+      // Already STARTED or still transitioning — skip.
+      log::verbose("OnPrimaryStarted: secondary {} not in OPEN state, skipping", peer);
+      continue;
+    }
+    log::info("OnPrimaryStarted: primary={} re-dispatching force-start on secondary {}",
+              primary, peer);
+    btif_av_source_request_start_stream(peer);
+  }
 }
 
 bt_status_t ForceStartSecondaryPeer(const RawAddress& peer) {
