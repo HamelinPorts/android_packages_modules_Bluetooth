@@ -28,12 +28,11 @@
 
 #include <bluetooth/log.h>
 #include <bluetooth/types/address.h>
+#include <com_android_bluetooth_flags.h>
 #include <hardware/bluetooth.h>
 
 #include <mutex>
 #include <unordered_set>
-
-#include "osi/include/properties.h"
 
 namespace {
 
@@ -95,8 +94,9 @@ private:
 namespace bluetooth::dual_audio {
 
 bool Enabled() {
-  // Wk 2: sysprop read. Wk 3 migrates to aconfig flag.
-  return osi_property_get_bool("persist.bluetooth.a2dp.dup_active", false);
+  // Wk 3: aconfig flag (migrated from the Wk 2 sysprop). Wired via the
+  // `a2dp_dup_active` flag in flags/a2dp.aconfig.
+  return com_android_bluetooth_flags_a2dp_dup_active();
 }
 
 bool AllowNonActiveStart(const RawAddress& peer) {
