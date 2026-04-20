@@ -15,7 +15,13 @@
 
 package com.android.bluetooth.dualaudio;
 
+import android.annotation.RequiresPermission;
+import android.annotation.SuppressLint;
+import android.bluetooth.BluetoothA2dp;
+import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothProfile;
 import android.content.Context;
 import android.database.ContentObserver;
 import android.os.Handler;
@@ -25,6 +31,9 @@ import android.provider.Settings;
 import android.util.Log;
 
 import com.android.bluetooth.flags.Flags;
+
+import java.lang.reflect.Method;
+import java.util.List;
 
 import java.util.HashSet;
 import java.util.Objects;
@@ -116,11 +125,22 @@ public final class DualAudioCoordinator {
 
     /**
      * Called when the enable state may have changed (e.g. user toggled
-     * Settings.Global via the dualaudio-app). If the feature is now
-     * disabled, immediately stop all tracked secondaries.
+     * Settings.Global via the dualaudio-app).
+     *
+     * - If now disabled: immediately stop all tracked secondaries.
+     * - If now enabled: auto-promote every currently-connected non-active
+     *   A2DP peer to secondary. Without this, the user would have to also
+     *   flip the primary in system Settings to activate dual audio; the
+     *   toggle alone should be sufficient.
+     *
+     * TODO (Wk5.2): respect the dualaudio-app's per-device include
+     *   prefs (Settings or SharedPrefs). Currently ALL connected
+     *   non-active peers are promoted.
      */
+    @SuppressLint("AndroidFrameworkRequiresPermission")
     private void onEnableMayHaveChanged() {
         if (isEnabled()) {
+            autoPromoteConnectedPeers();
             return;
         }
         Log.i(TAG, "onEnableMayHaveChanged: now disabled, tearing down secondaries");
@@ -132,6 +152,61 @@ public final class DualAudioCoordinator {
         for (BluetoothDevice d : snapshot) {
             mNativeInterface.forceStopSecondaryPeer(d);
         }
+    }
+
+    @SuppressLint("AndroidFrameworkRequiresPermission")
+    @RequiresPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
+    private void autoPromoteConnectedPeers() {
+        Context ctx = mContext;
+        if (ctx == null) {
+            Log.w(TAG, "autoPromoteConnectedPeers: no context");
+            return;
+        }
+        BluetoothManager bm = ctx.getSystemService(BluetoothManager.class);
+        if (bm == null) return;
+        final BluetoothAdapter adapter = bm.getAdapter();
+        if (adapter == null) return;
+
+        adapter.getProfileProxy(ctx, new BluetoothProfile.ServiceListener() {
+            @Override
+            public void onServiceConnected(int profile, BluetoothProfile proxy) {
+                if (profile != BluetoothProfile.A2DP) {
+                    adapter.closeProfileProxy(profile, proxy);
+                    return;
+                }
+                try {
+                    BluetoothA2dp a2dp = (BluetoothA2dp) proxy;
+                    BluetoothDevice active = null;
+                    try {
+                        Method m = BluetoothA2dp.class.getMethod("getActiveDevice");
+                        active = (BluetoothDevice) m.invoke(a2dp);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "getActiveDevice failed", t);
+                    }
+                    List<BluetoothDevice> connected = a2dp.getConnectedDevices();
+                    Log.i(TAG, "autoPromoteConnectedPeers: active=" + active
+                            + " connected=" + connected);
+                    for (BluetoothDevice d : connected) {
+                        if (d.equals(active)) continue;
+                        synchronized (mLock) {
+                            mSecondaries.add(d);
+                        }
+                        boolean ok = mNativeInterface.forceStartSecondaryPeer(d);
+                        Log.i(TAG, "autoPromoteConnectedPeers: " + d
+                                + " → forceStartSecondaryPeer returned " + ok);
+                        if (!ok) {
+                            synchronized (mLock) {
+                                mSecondaries.remove(d);
+                            }
+                        }
+                    }
+                } finally {
+                    adapter.closeProfileProxy(BluetoothProfile.A2DP, proxy);
+                }
+            }
+
+            @Override public void onServiceDisconnected(int profile) {}
+        }, BluetoothProfile.A2DP);
     }
 
     public Set<BluetoothDevice> getSecondaries() {
