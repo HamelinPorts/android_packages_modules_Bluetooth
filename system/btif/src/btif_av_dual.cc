@@ -26,6 +26,8 @@
 
 #include "btif/include/dual_audio_bridge.h"
 
+#include "btif/include/btif_a2dp_source_dual.h"
+
 #include <bluetooth/log.h>
 #include <bluetooth/types/address.h>
 #include <com_android_bluetooth_flags.h>
@@ -196,6 +198,7 @@ bt_status_t ForceStartSecondaryPeer(const RawAddress& peer) {
   // Mark the peer BEFORE dispatching the start so that the BTA_AV_START_EVT
   // handler's AllowNonActiveStart() check finds us in the set.
   ForcedSecondaryRegistry::Get().Add(peer);
+  RegisterPeerTx(peer);
   log::info("ForceStartSecondaryPeer({}) : dispatching start", peer);
   btif_av_source_request_start_stream(peer);
   return BT_STATUS_SUCCESS;
@@ -206,6 +209,7 @@ bt_status_t ForceStopSecondaryPeer(const RawAddress& peer) {
     return BT_STATUS_PARM_INVALID;
   }
   ForcedSecondaryRegistry::Get().Remove(peer);
+  UnregisterPeerTx(peer);
   log::info("ForceStopSecondaryPeer({}) : dispatching suspend", peer);
   btif_av_source_request_suspend_stream(peer);
   return BT_STATUS_SUCCESS;
