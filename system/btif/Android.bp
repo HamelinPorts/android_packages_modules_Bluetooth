@@ -60,6 +60,7 @@ cc_library_static {
         "src/btif_a2dp_sink.cc",
         "src/btif_a2dp_source.cc",
         "src/btif_av.cc",
+        "src/btif_av_dual.cc",
         "src/btif_ble_scanner.cc",
         "src/btif_bqr.cc",
         "src/btif_config.cc",

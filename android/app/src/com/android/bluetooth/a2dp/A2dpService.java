@@ -57,6 +57,7 @@ import com.android.bluetooth.Utils;
 import com.android.bluetooth.btservice.AdapterService;
 import com.android.bluetooth.btservice.ConnectableProfile;
 import com.android.bluetooth.btservice.ProfileService;
+import com.android.bluetooth.dualaudio.DualAudioCoordinator;  // SM-X205 dual-A2DP hook
 import com.android.bluetooth.flags.Flags;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
@@ -543,6 +544,10 @@ public class A2dpService extends ConnectableProfile {
                     newActiveDevice,
                     previousActiveDevice,
                     BluetoothProfileConnectionInfo.createA2dpInfo(true, rememberedVolume));
+
+            // SM-X205 dual-A2DP hook-point: delegates to overlay. Stub in Wk 1.
+            DualAudioCoordinator.getInstance()
+                    .onActiveDeviceChanged(previousActiveDevice, newActiveDevice);
         }
         return true;
     }
