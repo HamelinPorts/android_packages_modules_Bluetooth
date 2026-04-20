@@ -55,6 +55,12 @@ bool AllowMultiStreamWrites();
 void OnPrimaryActiveDeviceChanged(const RawAddress& from,
                                   const RawAddress& to);
 
+// Called from btif_av.cc BTA_AV_START_EVT handler when the event is for
+// the current active (primary) peer. Wk 4 auto-rejoin: re-fires
+// force-start on any secondary that's not already STARTED, so audio
+// resumes on both after a pause/resume gap.
+void OnPrimaryStarted(const RawAddress& primary);
+
 // Public API for DualAudioCoordinator to drive a non-active peer into
 // STARTED or SUSPENDED state. Called via JNI.
 // Week-1 stub: returns BT_STATUS_UNSUPPORTED; actual impl in Wk 2.

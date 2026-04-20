@@ -2310,6 +2310,12 @@ bool BtifAvStateMachine::StateOpened::ProcessEvent(uint32_t event, void* p_data)
             btif_a2dp_on_started(peer_.PeerAddress(), &p_av->start, A2dpType::kSource)) {
           // Only clear pending flag after acknowledgement
           peer_.ClearFlags(BtifAvPeer::kFlagPendingStart);
+          // SM-X205 dual-A2DP: the active (primary) peer just entered STARTED.
+          // Signal the overlay so auto-rejoin can re-force-start any
+          // secondaries that idled out during a pause/resume gap.
+          if (peer_.IsActivePeer()) {
+            bluetooth::dual_audio::OnPrimaryStarted(peer_.PeerAddress());
+          }
         }
       }
 
