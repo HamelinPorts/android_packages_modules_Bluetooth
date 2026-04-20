@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "audio_hal_interface/a2dp_encoding.h"
+#include "btif/include/dual_audio_bridge.h"  // SM-X205 dual-A2DP hook-point
 #include "bta/include/bta_api.h"
 #include "bta/include/bta_api_data_types.h"
 #include "bta/include/bta_av_api.h"
@@ -2295,7 +2296,9 @@ bool BtifAvStateMachine::StateOpened::ProcessEvent(uint32_t event, void* p_data)
         if (!peer_.CheckFlags(BtifAvPeer::kFlagPendingStart | BtifAvPeer::kFlagRemoteSuspend)) {
           log::warn("Peer {} : trigger Suspend as remote initiated", peer_.PeerAddress());
           should_suspend = true;
-        } else if (!peer_.IsActivePeer()) {
+        } else if (!peer_.IsActivePeer() &&
+                   !bluetooth::dual_audio::AllowNonActiveStart(peer_.PeerAddress())) {
+          // SM-X205 dual-A2DP hook-point: delegates to overlay.
           log::warn("Peer {} : trigger Suspend as non-active", peer_.PeerAddress());
           should_suspend = true;
         }

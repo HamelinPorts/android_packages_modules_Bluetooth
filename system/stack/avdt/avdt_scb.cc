@@ -33,6 +33,7 @@
 #include "avdt_api.h"
 #include "avdt_int.h"
 #include "avdtc_api.h"
+#include "btif/include/dual_audio_bridge.h"  // SM-X205 dual-A2DP hook-point
 #include "internal_include/bt_target.h"
 #include "osi/include/alarm.h"
 
@@ -784,6 +785,18 @@ void avdt_scb_event(AvdtpScb* p_scb, uint8_t event, tAVDT_SCB_EVT* p_data) {
 
   if (num_st_streams == 1) {
     avdtp_cb.ccb[ccb_index].scb[scb_index].curr_stream = true;
+  } else if (num_st_streams > 1 && bluetooth::dual_audio::AllowMultiStreamWrites()) {
+    // SM-X205 dual-A2DP hook-point: mark every streaming SCB as
+    // curr_stream so concurrent writes (from bta_av_dup_audio_buf) all
+    // pass through.
+    for (int i = 0; i < AVDT_NUM_LINKS; i++) {
+      for (int j = 0; j < AVDT_NUM_SEPS; j++) {
+        AvdtpScb* p_scb_i = &avdtp_cb.ccb[i].scb[j];
+        if (p_scb_i->allocated && avdt_scb_st_tbl[p_scb_i->state] == avdt_scb_st_stream) {
+          p_scb_i->curr_stream = true;
+        }
+      }
+    }
   } else if (num_st_streams > 1 && !p_scb->curr_stream && event == AVDT_SCB_API_WRITE_REQ_EVT) {
     log::error("ignore AVDT_SCB_API_WRITE_REQ_EVT");
     avdt_scb_free_pkt(p_scb, p_data);
