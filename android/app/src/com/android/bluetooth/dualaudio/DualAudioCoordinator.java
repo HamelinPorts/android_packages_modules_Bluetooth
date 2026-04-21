@@ -23,7 +23,10 @@ import android.bluetooth.BluetoothCodecConfig;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.database.ContentObserver;
 import android.os.Handler;
 import android.os.Looper;
@@ -31,6 +34,7 @@ import android.os.SystemProperties;
 import android.provider.Settings;
 import android.util.Log;
 
+import com.android.bluetooth.btservice.AdapterService;
 import com.android.bluetooth.flags.Flags;
 
 import java.lang.reflect.Method;
@@ -127,6 +131,65 @@ public final class DualAudioCoordinator {
         } catch (Throwable t) {
             Log.w(TAG, "registerContentObserver failed", t);
         }
+        // Wk 9 — cross-process entry point from the dualaudio-app for
+        // per-peer volume changes. The app can't call AvrcpVolumeManager
+        // directly (package-private + wrong process); it sends us a
+        // broadcast and we relay via reflection.
+        try {
+            IntentFilter f = new IntentFilter(ACTION_SET_PEER_VOLUME);
+            mContext.registerReceiver(mVolumeReceiver, f, Context.RECEIVER_EXPORTED);
+            Log.i(TAG, "registered SET_PEER_VOLUME receiver");
+        } catch (Throwable t) {
+            Log.w(TAG, "registerReceiver(SET_PEER_VOLUME) failed", t);
+        }
+    }
+
+    private static final String ACTION_SET_PEER_VOLUME =
+            "org.lineageos.dualaudio.SET_PEER_VOLUME";
+
+    private final BroadcastReceiver mVolumeReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            String mac = intent.getStringExtra("mac");
+            int vol = intent.getIntExtra("volume", -1);
+            if (mac == null || vol < 0) {
+                Log.w(TAG, "SET_PEER_VOLUME: missing/invalid mac or volume");
+                return;
+            }
+            BluetoothManager bm = ctx.getSystemService(BluetoothManager.class);
+            BluetoothAdapter adapter = bm == null ? null : bm.getAdapter();
+            if (adapter == null) return;
+            BluetoothDevice device;
+            try {
+                device = adapter.getRemoteDevice(mac.toUpperCase(java.util.Locale.US));
+            } catch (IllegalArgumentException iae) {
+                Log.w(TAG, "SET_PEER_VOLUME: bad mac " + mac);
+                return;
+            }
+            setPeerVolume(device, vol);
+        }
+    };
+
+    /**
+     * Send an AVRCP absolute-volume command to a specific peer via
+     * AvrcpVolumeManager.sendVolumeChanged(BluetoothDevice, int). That
+     * method is package-private in com.android.bluetooth.avrcp, so we
+     * reach it reflectively. No-op when the AVRCP target service isn't
+     * running (e.g., during adapter-off).
+     */
+    public void setPeerVolume(BluetoothDevice device, int systemVolume) {
+        if (device == null) return;
+        AdapterService adapter = AdapterService.deprecatedGetAdapterService();
+        if (adapter == null) {
+            Log.w(TAG, "setPeerVolume: AdapterService not running");
+            return;
+        }
+        adapter.getAvrcpTargetService().ifPresentOrElse(
+                svc -> {
+                    svc.sendVolumeChangedToDevice(device, systemVolume);
+                    Log.i(TAG, "setPeerVolume: " + device + " → " + systemVolume);
+                },
+                () -> Log.w(TAG, "setPeerVolume: AvrcpTargetService not running"));
     }
 
     public boolean isEnabled() {

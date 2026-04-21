@@ -300,6 +300,17 @@ public class AvrcpTargetService extends ProfileService {
     }
 
     /**
+     * Send an AVRCP SetAbsoluteVolume command to a specific peer (not just
+     * the active one). Used by the SM-X205 dual-audio overlay for per-peer
+     * volume sliders. No-op if the peer isn't connected or isn't
+     * absolute-volume-capable. See {@link AvrcpVolumeManager#sendVolumeChanged}.
+     */
+    public void sendVolumeChangedToDevice(BluetoothDevice device, int systemVolume) {
+        if (device == null || mVolumeManager == null) return;
+        mVolumeManager.sendVolumeChanged(device, systemVolume);
+    }
+
+    /**
      * Handle when A2DP connection state changes.
      *
      * <p>If the A2DP connection disconnects, we request AVRCP to disconnect device as well.
