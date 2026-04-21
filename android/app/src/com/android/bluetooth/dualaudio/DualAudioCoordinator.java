@@ -163,13 +163,33 @@ public final class DualAudioCoordinator {
         } catch (Throwable t) {
             Log.w(TAG, "registerReceiver(DUMP_STATE) failed", t);
         }
-        // Wk 9b — seed a2dp_dup_peer_volumes from AVRCP so the app's
-        // sliders start at the correct position. AvrcpTargetService might
-        // not be up at attach-time; seed on a short delay and again when
-        // the enable state changes (which is also when the app usually
-        // has the UI open).
+        // Seed peer volumes from AVRCP so the app's sliders open at the
+        // real current position. AvrcpTargetService might not be up at
+        // attach-time, and the DualAudioProvider is credential-protected
+        // (not direct-boot-aware) so the initial seed must wait until
+        // after user unlock. Two triggers:
+        //   1. +2s post attach — covers subsequent reboots where user is
+        //      already unlocked (rare in practice but cheap).
+        //   2. ACTION_USER_UNLOCKED — the reliable signal that CE storage
+        //      (including the DualAudioProvider's SharedPreferences) is
+        //      readable and writable.
         mHandler.postDelayed(this::seedPeerVolumesFromAvrcp, 2000L);
+        try {
+            IntentFilter f = new IntentFilter(Intent.ACTION_USER_UNLOCKED);
+            mContext.registerReceiver(mUnlockReceiver, f,
+                    null, mHandler, Context.RECEIVER_NOT_EXPORTED);
+        } catch (Throwable t) {
+            Log.w(TAG, "registerReceiver(USER_UNLOCKED) failed", t);
+        }
     }
+
+    private final BroadcastReceiver mUnlockReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            Log.i(TAG, "USER_UNLOCKED — retrying seedPeerVolumesFromAvrcp");
+            seedPeerVolumesFromAvrcp();
+        }
+    };
 
     private static final String ACTION_SET_PEER_VOLUME =
             "org.lineageos.dualaudio.SET_PEER_VOLUME";
