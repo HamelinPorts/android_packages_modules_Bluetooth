@@ -134,7 +134,7 @@ public final class DualAudioCoordinator {
         // Wk 9 — cross-process entry point from the dualaudio-app for
         // per-peer volume changes. The app can't call AvrcpVolumeManager
         // directly (package-private + wrong process); it sends us a
-        // broadcast and we relay via reflection.
+        // broadcast and we relay.
         try {
             IntentFilter f = new IntentFilter(ACTION_SET_PEER_VOLUME);
             mContext.registerReceiver(mVolumeReceiver, f, Context.RECEIVER_EXPORTED);
@@ -142,6 +142,12 @@ public final class DualAudioCoordinator {
         } catch (Throwable t) {
             Log.w(TAG, "registerReceiver(SET_PEER_VOLUME) failed", t);
         }
+        // Wk 9b — seed a2dp_dup_peer_volumes from AVRCP so the app's
+        // sliders start at the correct position. AvrcpTargetService might
+        // not be up at attach-time; seed on a short delay and again when
+        // the enable state changes (which is also when the app usually
+        // has the UI open).
+        mHandler.postDelayed(this::seedPeerVolumesFromAvrcp, 2000L);
     }
 
     private static final String ACTION_SET_PEER_VOLUME =
@@ -187,9 +193,87 @@ public final class DualAudioCoordinator {
         adapter.getAvrcpTargetService().ifPresentOrElse(
                 svc -> {
                     svc.sendVolumeChangedToDevice(device, systemVolume);
+                    recordPeerVolume(device, systemVolume);
                     Log.i(TAG, "setPeerVolume: " + device + " → " + systemVolume);
                 },
                 () -> Log.w(TAG, "setPeerVolume: AvrcpTargetService not running"));
+    }
+
+    // ------------------------------------------------------------------
+    // Wk 9b — publish per-peer volume to Settings.Global so the app UI
+    // (separate process) can show the real current value on its slider.
+    //
+    // Schema: Settings.Global.a2dp_dup_peer_volumes = "MAC:vol,MAC:vol,..."
+    // MAC is uppercase canonical form; vol is the system-level volume
+    // (0..AvrcpVolumeManager.mDeviceMaxVolume, typically 0..15).
+    //
+    // Covered update sources:
+    //   1. setPeerVolume (local write from the app slider)
+    //   2. seedFromAvrcp (called once we have an AvrcpTargetService —
+    //      scrapes getRememberedVolumeForDevice per bonded A2DP peer).
+    // Not yet covered (Wk 9c): peer-initiated VolumeChanged from a
+    //   non-active peer. That needs a hook in AvrcpVolumeManager's
+    //   storeVolumeForDevice path — ~1 extra AOSP hook point.
+    // ------------------------------------------------------------------
+
+    private final Map<String, Integer> mPublishedVolumes = new HashMap<>();
+
+    private void recordPeerVolume(BluetoothDevice device, int volume) {
+        if (device == null) return;
+        synchronized (mLock) {
+            mPublishedVolumes.put(
+                    device.getAddress().toUpperCase(java.util.Locale.US), volume);
+        }
+        flushPeerVolumesToSettings();
+    }
+
+    private void flushPeerVolumesToSettings() {
+        Context ctx = mContext;
+        if (ctx == null) return;
+        StringBuilder sb = new StringBuilder();
+        synchronized (mLock) {
+            boolean first = true;
+            for (Map.Entry<String, Integer> e : mPublishedVolumes.entrySet()) {
+                if (!first) sb.append(',');
+                sb.append(e.getKey()).append(':').append(e.getValue());
+                first = false;
+            }
+        }
+        try {
+            Settings.Global.putString(ctx.getContentResolver(),
+                    "a2dp_dup_peer_volumes", sb.toString());
+        } catch (Throwable t) {
+            Log.w(TAG, "flushPeerVolumesToSettings failed", t);
+        }
+    }
+
+    @SuppressLint("AndroidFrameworkRequiresPermission")
+    @RequiresPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
+    public void seedPeerVolumesFromAvrcp() {
+        Context ctx = mContext;
+        if (ctx == null) return;
+        AdapterService adapter = AdapterService.deprecatedGetAdapterService();
+        if (adapter == null) return;
+        adapter.getAvrcpTargetService().ifPresent(svc -> {
+            BluetoothManager bm = ctx.getSystemService(BluetoothManager.class);
+            BluetoothAdapter btAdapter = bm == null ? null : bm.getAdapter();
+            if (btAdapter == null) return;
+            int count = 0;
+            synchronized (mLock) {
+                for (BluetoothDevice d : btAdapter.getBondedDevices()) {
+                    int v = svc.getRememberedVolumeForDevice(d);
+                    if (v >= 0) {
+                        mPublishedVolumes.put(
+                                d.getAddress().toUpperCase(java.util.Locale.US), v);
+                        count++;
+                    }
+                }
+            }
+            if (count > 0) {
+                flushPeerVolumesToSettings();
+                Log.i(TAG, "seedPeerVolumesFromAvrcp: seeded " + count + " peer volume(s)");
+            }
+        });
     }
 
     public boolean isEnabled() {
