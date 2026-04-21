@@ -197,8 +197,16 @@ public final class DualAudioCoordinator {
     private static final String ACTION_DUMP_STATE =
             "org.lineageos.dualaudio.DUMP_STATE";
 
+    // Use the existing framework BLUETOOTH_PRIVILEGED (signature|privileged)
+    // to gate cross-process entry points. A custom signature permission
+    // can't work here: this coordinator lives in Bluetooth.apk signed with
+    // "bluetooth" cert, while the BluetoothDualAudio app is signed with
+    // "platform" cert, so no single signature relation holds between them.
+    // BLUETOOTH_PRIVILEGED is granted to both (platform-signed app ↔
+    // signature match, Bluetooth.apk inside APEX ↔ privileged match) and
+    // to nothing else on a clean device.
     private static final String CONTROL_PERMISSION =
-            "org.lineageos.dualaudio.permission.CONTROL";
+            "android.permission.BLUETOOTH_PRIVILEGED";
 
     // Signature-gated persistence provider owned by the BluetoothDualAudio
     // app. Same constants as DualAudioProvider.java — replicated here so the
