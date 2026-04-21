@@ -29,6 +29,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.database.ContentObserver;
+import android.net.Uri;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemProperties;
@@ -117,11 +119,13 @@ public final class DualAudioCoordinator {
                             onEnableMayHaveChanged();
                         }
                     });
-            // Observe Settings.Global.a2dp_dup_members — per-device include list.
-            // On change, reconcile: stop peers removed from the list, start
-            // peers added (subject to the master switch being on).
+            // Observe the include list stored in DualAudioProvider. The app
+            // calls notifyChange on PROVIDER_URI_MEMBERS after every
+            // setMembers, triggering this observer. On change, reconcile:
+            // stop peers removed from the list, start peers added (subject
+            // to the master switch being on).
             mContext.getContentResolver().registerContentObserver(
-                    Settings.Global.getUriFor("a2dp_dup_members"),
+                    PROVIDER_URI_MEMBERS,
                     false,
                     new ContentObserver(mHandler) {
                         @Override
@@ -176,6 +180,24 @@ public final class DualAudioCoordinator {
     private static final String CONTROL_PERMISSION =
             "org.lineageos.dualaudio.permission.CONTROL";
 
+    // Signature-gated persistence provider owned by the BluetoothDualAudio
+    // app. Same constants as DualAudioProvider.java — replicated here so the
+    // Bluetooth APEX doesn't have to depend on the app's class path. Wire
+    // contract only: mismatches would only manifest at runtime, not build.
+    private static final Uri PROVIDER_URI =
+            Uri.parse("content://org.lineageos.dualaudio.provider");
+    private static final Uri PROVIDER_URI_MEMBERS =
+            Uri.withAppendedPath(PROVIDER_URI, "members");
+    // Note: volumes sub-URI exists (for app-side observers) but the
+    // coordinator is write-only on volumes, so we don't observe it.
+    private static final String METHOD_GET_MEMBERS = "getMembers";
+    private static final String METHOD_SET_VOLUME  = "setVolume";
+    private static final String METHOD_GET_VOLUMES = "getVolumes";
+    private static final String EXTRA_MACS   = "macs";
+    private static final String EXTRA_UNSET  = "unset";
+    private static final String EXTRA_PAIRS  = "pairs";
+    private static final String EXTRA_VOLUME = "volume";
+
     private final BroadcastReceiver mDumpReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context ctx, Intent intent) {
@@ -199,18 +221,29 @@ public final class DualAudioCoordinator {
         Context ctx = mContext;
         if (ctx != null) {
             try {
-                String members = Settings.Global.getString(
-                        ctx.getContentResolver(), "a2dp_dup_members");
-                sb.append("  members:     ")
-                        .append(members == null ? "(unset — all)" : members)
-                        .append('\n');
-                String vols = Settings.Global.getString(
-                        ctx.getContentResolver(), "a2dp_dup_peer_volumes");
+                Bundle mb = ctx.getContentResolver().call(
+                        PROVIDER_URI, METHOD_GET_MEMBERS, null, null);
+                if (mb == null) {
+                    sb.append("  members:     (provider unreachable)\n");
+                } else if (mb.getBoolean(EXTRA_UNSET, false)) {
+                    sb.append("  members:     (unset — all)\n");
+                } else {
+                    java.util.ArrayList<String> macs =
+                            mb.getStringArrayList(EXTRA_MACS);
+                    sb.append("  members:     ")
+                            .append(macs == null ? "(empty)" : macs.toString())
+                            .append('\n');
+                }
+                Bundle vb = ctx.getContentResolver().call(
+                        PROVIDER_URI, METHOD_GET_VOLUMES, null, null);
+                java.util.ArrayList<String> pairs = vb == null
+                        ? null : vb.getStringArrayList(EXTRA_PAIRS);
                 sb.append("  pub volumes: ")
-                        .append(vols == null ? "(none)" : vols)
+                        .append(pairs == null || pairs.isEmpty()
+                                ? "(none)" : pairs.toString())
                         .append('\n');
             } catch (Throwable t) {
-                Log.w(TAG, "dumpState: Settings.Global read failed", t);
+                Log.w(TAG, "dumpState: provider read failed", t);
             }
         }
         synchronized (mLock) {
@@ -280,23 +313,14 @@ public final class DualAudioCoordinator {
     }
 
     // ------------------------------------------------------------------
-    // Wk 9b — publish per-peer volume to Settings.Global so the app UI
+    // Publish per-peer volume to DualAudioProvider so the app UI
     // (separate process) can show the real current value on its slider.
-    //
-    // Schema: Settings.Global.a2dp_dup_peer_volumes = "SUFFIX:vol,SUFFIX:vol,..."
-    // SUFFIX is the last 5 chars of the MAC (e.g. "AA:3D") — the only
-    // portion that's invariant across Android's per-process MAC
-    // anonymization. vol is the system-level volume
-    // (0..AvrcpVolumeManager.mDeviceMaxVolume, typically 0..15).
-    //
-    // Why suffix only: Settings.Global is world-readable by any app with
-    // no permission required. Writing full MACs there leaks the user's
-    // paired BT device identifiers to every installed app. The suffix is
-    // enough for the app UI to match its own BluetoothDevice entries
-    // (both sides agree on the last 5 chars).
+    // The provider is signature-gated so full MACs stay private.
     //
     // Covered update sources:
-    //   1. setPeerVolume (local write from the app slider)
+    //   1. setPeerVolume (local write triggered by the app slider
+    //      broadcast — we round-trip the volume back to the app so it
+    //      can reflect confirmation / future-us updates).
     //   2. seedFromAvrcp (called once we have an AvrcpTargetService —
     //      scrapes getRememberedVolumeForDevice per bonded A2DP peer).
     // Not yet covered: peer-initiated VolumeChanged from a non-active
@@ -304,36 +328,33 @@ public final class DualAudioCoordinator {
     //   storeVolumeForDevice path — ~1 extra AOSP hook point.
     // ------------------------------------------------------------------
 
-    /** Map keyed by mac suffix (last 5 chars, e.g. "AA:3D"). */
+    /**
+     * Local cache of what we've pushed to the provider (full MAC →
+     * volume). Used for dumpState; not the source of truth.
+     */
     private final Map<String, Integer> mPublishedVolumes = new HashMap<>();
 
     private void recordPeerVolume(BluetoothDevice device, int volume) {
         if (device == null) return;
-        String suffix = macSuffix(device.getAddress());
-        if (suffix.isEmpty()) return;
+        String mac = device.getAddress();
+        if (mac == null || mac.isEmpty()) return;
+        String norm = mac.toUpperCase(java.util.Locale.US);
         synchronized (mLock) {
-            mPublishedVolumes.put(suffix, volume);
+            mPublishedVolumes.put(norm, volume);
         }
-        flushPeerVolumesToSettings();
+        pushVolumeToProvider(norm, volume);
     }
 
-    private void flushPeerVolumesToSettings() {
+    private void pushVolumeToProvider(String normalizedMac, int volume) {
         Context ctx = mContext;
         if (ctx == null) return;
-        StringBuilder sb = new StringBuilder();
-        synchronized (mLock) {
-            boolean first = true;
-            for (Map.Entry<String, Integer> e : mPublishedVolumes.entrySet()) {
-                if (!first) sb.append(',');
-                sb.append(e.getKey()).append(':').append(e.getValue());
-                first = false;
-            }
-        }
+        Bundle extras = new Bundle();
+        extras.putInt(EXTRA_VOLUME, volume);
         try {
-            Settings.Global.putString(ctx.getContentResolver(),
-                    "a2dp_dup_peer_volumes", sb.toString());
+            ctx.getContentResolver().call(
+                    PROVIDER_URI, METHOD_SET_VOLUME, normalizedMac, extras);
         } catch (Throwable t) {
-            Log.w(TAG, "flushPeerVolumesToSettings failed", t);
+            Log.w(TAG, "pushVolumeToProvider failed", t);
         }
     }
 
@@ -349,19 +370,19 @@ public final class DualAudioCoordinator {
             BluetoothAdapter btAdapter = bm == null ? null : bm.getAdapter();
             if (btAdapter == null) return;
             int count = 0;
-            synchronized (mLock) {
-                for (BluetoothDevice d : btAdapter.getBondedDevices()) {
-                    int v = svc.getRememberedVolumeForDevice(d);
-                    if (v >= 0) {
-                        String suffix = macSuffix(d.getAddress());
-                        if (suffix.isEmpty()) continue;
-                        mPublishedVolumes.put(suffix, v);
-                        count++;
-                    }
+            for (BluetoothDevice d : btAdapter.getBondedDevices()) {
+                int v = svc.getRememberedVolumeForDevice(d);
+                if (v < 0) continue;
+                String mac = d.getAddress();
+                if (mac == null || mac.isEmpty()) continue;
+                String norm = mac.toUpperCase(java.util.Locale.US);
+                synchronized (mLock) {
+                    mPublishedVolumes.put(norm, v);
                 }
+                pushVolumeToProvider(norm, v);
+                count++;
             }
             if (count > 0) {
-                flushPeerVolumesToSettings();
                 Log.i(TAG, "seedPeerVolumesFromAvrcp: seeded " + count + " peer volume(s)");
             }
         });
@@ -476,31 +497,40 @@ public final class DualAudioCoordinator {
     }
 
     /**
-     * Returns the set of MAC suffixes (last 5 chars, e.g. "AA:3D") the user
-     * explicitly included via the dualaudio-app's per-device switches,
-     * stored in Settings.Global.a2dp_dup_members.
+     * Returns the set of MAC suffixes (last 5 chars, e.g. "AA:3D") the
+     * user explicitly included via the app's per-device switches. Full
+     * MACs are held in DualAudioProvider; this reduces them to suffixes
+     * so the coordinator can match against the BT-process view of peer
+     * MACs (Android per-process MAC anonymization leaves only the last
+     * 2 octets invariant across processes).
      *
      * Semantics:
-     *   null (return value)       → key never set → "no filter, promote all"
-     *   empty set                 → key set to "" → "explicit empty, promote none"
+     *   null (return value)       → list unset → "no filter, promote all"
+     *   empty set                 → explicit empty → "promote none"
      *   non-empty set             → only these suffixes
      */
     private Set<String> getIncludedMacSuffixes() {
         Context ctx = mContext;
         if (ctx == null) return null;
-        String csv;
+        Bundle b;
         try {
-            csv = Settings.Global.getString(ctx.getContentResolver(), "a2dp_dup_members");
+            b = ctx.getContentResolver().call(
+                    PROVIDER_URI, METHOD_GET_MEMBERS, null, null);
         } catch (Throwable t) {
             return null;
         }
-        if (csv == null) return null;  // key unset → no filter
-        Set<String> out = new HashSet<>();
-        for (String mac : csv.split(",")) {
-            String s = macSuffix(mac.trim());
-            if (!s.isEmpty()) out.add(s);
+        if (b == null || b.getBoolean(EXTRA_UNSET, false)) {
+            return null;
         }
-        return out;  // may be empty — caller treats as "promote none"
+        java.util.ArrayList<String> macs = b.getStringArrayList(EXTRA_MACS);
+        Set<String> out = new HashSet<>();
+        if (macs != null) {
+            for (String mac : macs) {
+                String s = macSuffix(mac);
+                if (!s.isEmpty()) out.add(s);
+            }
+        }
+        return out;
     }
 
     @SuppressLint("AndroidFrameworkRequiresPermission")
