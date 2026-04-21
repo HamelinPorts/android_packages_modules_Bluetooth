@@ -9,14 +9,14 @@ flag {
     bug: "380118954"
 }
 
-# SM-X205 dual-A2DP overlay. Gates the dual-streaming feature that keeps a
+# dual-A2DP overlay. Gates the dual-streaming feature that keeps a
 # secondary A2DP peer in force-started state alongside the primary. Off by
-# default; enabled per-device via DeviceConfig override and/or the dualaudio
-# user-facing app.
+# default; enabled per-device via DeviceConfig override and/or the
+# BluetoothDualAudio user-facing app.
 flag {
     name: "a2dp_dup_active"
     namespace: "bluetooth"
-    description: "Allow a second A2DP peer to stream simultaneously with the primary (SM-X205 overlay)"
+    description: "Allow a second A2DP peer to stream simultaneously with the primary"
     bug: "0"
     # PoC: default ENABLED on this device. Upstream-ready flag machinery
     # (device_config, aflags) controls the runtime behaviour once the

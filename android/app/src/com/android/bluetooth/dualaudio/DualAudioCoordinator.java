@@ -1,16 +1,17 @@
 /*
- * SM-X205 dual-A2DP overlay — Java coordinator.
+ * dual-A2DP overlay — Java coordinator.
  *
- * Week 2 of Phase 2: Phase-1-equivalent behavior, 100% of logic in this
- * file (no modifications to A2dpService beyond the 1-line hook call).
+ * Orchestrates simultaneous A2DP playback to multiple peers:
+ *   - Listens to the master-enable and per-device Settings.Global keys
+ *     written by the BluetoothDualAudio app.
+ *   - On enable: auto-promotes connected non-active peers to forced
+ *     secondaries via ForceStartSecondaryPeer (native bridge).
+ *   - Handles pause/resume auto-rejoin on the native OnPrimaryStarted
+ *     hook, poll-based force-start after active-device changes, and
+ *     optional codec coercion for mismatched-codec peer sets.
  *
- * Week 3 will:
- *   - Migrate the `persist.bluetooth.a2dp.dup_active` sysprop read to an
- *     aconfig flag.
- *   - Replace Handler.postDelayed(400) with a deterministic subscription
- *     to the demoted peer's BTA_AV_SUSPEND_EVT.
- *
- * See patches-draft/x205-dual-a2dp/PLAN-PHASE2.md.
+ * A2dpService calls attachContext() once on startup to hand us a
+ * Context; every other interaction is internal to this overlay.
  */
 
 package com.android.bluetooth.dualaudio;

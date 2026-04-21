@@ -1,23 +1,16 @@
 /*
- * SM-X205 dual-A2DP overlay — per-peer TX state registry implementation.
+ * Bluetooth dual-A2DP overlay — per-peer TX state registry implementation.
  *
- * Week 6 of Phase 2: scaffolding only. Registers an A2dpSourcePeerTx
- * context per forced secondary; encoder and queue fields stay nullptr
- * until Wk 7 wires the fan-out at btif_a2dp_source_audio_handle_timer().
+ * Scaffolding only. Registers an A2dpSourcePeerTx context per forced
+ * secondary; encoder and queue fields stay nullptr. Stock AOSP's
+ * bta_av_dup_audio_buf (bta_av_main.cc) already fans primary-encoded
+ * frames into every co_started SCB's a2dp_list, so per-peer queues are
+ * effectively provided by BTA when all peers agree on a codec. The
+ * Java-side DualAudioCoordinator covers the codec-mismatch case via
+ * runtime codec coercion to SBC.
  *
- * Stock A2DP source flow is untouched: no callsite in btif_a2dp_source.cc
- * reads this registry yet. Regression baseline = Wk 5 behavior.
- *
- * Wk 7 will:
- *   - Instantiate the per-peer encoder (shared across peers whose codec
- *     index + MTU match the primary; separate instance otherwise).
- *   - Allocate a per-peer fixed_queue for encoded frames.
- *   - Teach btif_a2dp_source_audio_readbuf() to route by peer.
- *
- * Wk 8 will add the codec-mismatch path (second encoder instance +
- * thread-local current-peer context for the enqueue callback).
- *
- * See patches-draft/x205-dual-a2dp/PLAN-PHASE2.md.
+ * This registry is retained for observability and as a stable
+ * extension point if a true per-peer encoder is ever added.
  */
 
 #define LOG_TAG "bt_dual_audio_src"

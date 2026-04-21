@@ -1,5 +1,5 @@
 /*
- * SM-X205 dual-A2DP overlay — JNI binding wrapper.
+ * dual-A2DP overlay — JNI binding wrapper.
  */
 
 package com.android.bluetooth.dualaudio;

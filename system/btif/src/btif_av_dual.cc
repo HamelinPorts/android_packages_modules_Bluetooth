@@ -1,5 +1,5 @@
 /*
- * SM-X205 dual-A2DP overlay — hook-point bridge implementation.
+ * Bluetooth dual-A2DP overlay — hook-point bridge implementation.
  *
  * Week 2 of Phase 2: Phase-1-equivalent behavior via the overlay.
  *
@@ -15,11 +15,9 @@
  * the hooks return true to bypass the enforcement only for these
  * peers and only when the sysprop is on.
  *
- * Week 3 will: (a) migrate the sysprop to an aconfig flag, (b)
- * replace the Java-side Handler.postDelayed race workaround with
- * event-driven coordination subscribed to BTA_AV_SUSPEND_EVT.
- *
- * See patches-draft/x205-dual-a2dp/PLAN-PHASE2.md.
+ * Activation is gated by the aconfig flag + persist sysprop fallback;
+ * per-peer force-start / force-stop is orchestrated from the Java
+ * DualAudioCoordinator, which this file exposes entry points for.
  */
 
 #define LOG_TAG "bt_dual_audio"
