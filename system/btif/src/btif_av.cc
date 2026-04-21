@@ -46,7 +46,7 @@
 #include <vector>
 
 #include "audio_hal_interface/a2dp_encoding.h"
-#include "btif/include/dual_audio_bridge.h"  // SM-X205 dual-A2DP hook-point
+#include "btif/include/dual_audio_bridge.h"  // dual-A2DP overlay hook-point
 #include "bta/include/bta_api.h"
 #include "bta/include/bta_api_data_types.h"
 #include "bta/include/bta_av_api.h"
@@ -2298,7 +2298,7 @@ bool BtifAvStateMachine::StateOpened::ProcessEvent(uint32_t event, void* p_data)
           should_suspend = true;
         } else if (!peer_.IsActivePeer() &&
                    !bluetooth::dual_audio::AllowNonActiveStart(peer_.PeerAddress())) {
-          // SM-X205 dual-A2DP hook-point: delegates to overlay.
+          // dual-A2DP hook-point: delegates to overlay.
           log::warn("Peer {} : trigger Suspend as non-active", peer_.PeerAddress());
           should_suspend = true;
         }
@@ -2310,7 +2310,7 @@ bool BtifAvStateMachine::StateOpened::ProcessEvent(uint32_t event, void* p_data)
             btif_a2dp_on_started(peer_.PeerAddress(), &p_av->start, A2dpType::kSource)) {
           // Only clear pending flag after acknowledgement
           peer_.ClearFlags(BtifAvPeer::kFlagPendingStart);
-          // SM-X205 dual-A2DP: the active (primary) peer just entered STARTED.
+          // dual-A2DP: the active (primary) peer just entered STARTED.
           // Signal the overlay so auto-rejoin can re-force-start any
           // secondaries that idled out during a pause/resume gap.
           if (peer_.IsActivePeer()) {
@@ -3818,7 +3818,7 @@ static void btif_av_sink_dispatch_sm_event(const RawAddress& peer_address,
                                    peer_address, kBtaHandleUnknown, btif_av_event));
 }
 
-// SM-X205 dual-A2DP: thin wrappers exposing per-peer BTIF-AV event dispatch
+// dual-A2DP: thin wrappers exposing per-peer BTIF-AV event dispatch
 // to the overlay module (btif_av_dual.cc). Additive — no change to existing
 // dispatch behavior.
 void btif_av_source_request_start_stream(const RawAddress& peer_address) {

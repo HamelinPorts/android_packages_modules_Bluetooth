@@ -2399,7 +2399,7 @@ jint JNI_OnLoad(JavaVM* jvm, void* /* reserved */) {
     return JNI_ERR;
   }
 
-  // SM-X205 dual-A2DP overlay.
+  // dual-A2DP overlay.
   status = android::register_com_android_bluetooth_dual_audio(e);
   if (status < 0) {
     log::error("jni dual-audio registration failure: {}", status);

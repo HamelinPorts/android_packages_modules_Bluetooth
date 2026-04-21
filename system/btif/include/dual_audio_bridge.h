@@ -1,16 +1,14 @@
 /*
- * SM-X205 dual-A2DP overlay — hook-point bridge header.
+ * Bluetooth dual-A2DP overlay — hook-point bridge header.
  *
  * This header declares the minimal API that Fluoride's existing files
  * (btif_av.cc, avdt_scb.cc, A2dpService.java via JNI) call into from
  * single-line hook points. The actual logic lives in btif_av_dual.cc
  * and DualAudioCoordinator.java; AOSP-maintained files only delegate.
  *
- * Week 1 of Phase 2: all functions are no-op stubs. Stock behavior
- * preserved byte-for-byte when the overlay is present. Regression
- * baseline.
- *
- * See patches-draft/x205-dual-a2dp/PLAN-PHASE2.md for the full plan.
+ * The feature is gated by the `a2dp_dup_active` aconfig flag plus a
+ * legacy persist sysprop fallback. When neither is set, every hook
+ * returns no-op / false and stock A2DP behavior is preserved.
  */
 
 #pragma once

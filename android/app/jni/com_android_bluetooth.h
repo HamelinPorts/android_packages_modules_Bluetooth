@@ -134,7 +134,7 @@ int register_com_android_bluetooth_a2dp(JNIEnv* env);
 
 int register_com_android_bluetooth_a2dp_sink(JNIEnv* env);
 
-// SM-X205 dual-A2DP overlay.
+// dual-A2DP overlay.
 int register_com_android_bluetooth_dual_audio(JNIEnv* env);
 
 int register_com_android_bluetooth_avrcp(JNIEnv* env);

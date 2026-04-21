@@ -1,10 +1,8 @@
 /*
- * SM-X205 dual-A2DP overlay — JNI bindings.
+ * dual-A2DP overlay — JNI bindings.
  *
  * Bridges DualAudioNativeInterface.java to the C++ overlay in
  * btif_av_dual.cc.
- *
- * See patches-draft/x205-dual-a2dp/PLAN-PHASE2.md.
  */
 
 #define LOG_TAG "bluetooth-dual-audio"

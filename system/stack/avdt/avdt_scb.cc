@@ -33,7 +33,7 @@
 #include "avdt_api.h"
 #include "avdt_int.h"
 #include "avdtc_api.h"
-#include "btif/include/dual_audio_bridge.h"  // SM-X205 dual-A2DP hook-point
+#include "btif/include/dual_audio_bridge.h"  // dual-A2DP overlay hook-point
 #include "internal_include/bt_target.h"
 #include "osi/include/alarm.h"
 
@@ -786,7 +786,7 @@ void avdt_scb_event(AvdtpScb* p_scb, uint8_t event, tAVDT_SCB_EVT* p_data) {
   if (num_st_streams == 1) {
     avdtp_cb.ccb[ccb_index].scb[scb_index].curr_stream = true;
   } else if (num_st_streams > 1 && bluetooth::dual_audio::AllowMultiStreamWrites()) {
-    // SM-X205 dual-A2DP hook-point: mark every streaming SCB as
+    // dual-A2DP hook-point: mark every streaming SCB as
     // curr_stream so concurrent writes (from bta_av_dup_audio_buf) all
     // pass through.
     for (int i = 0; i < AVDT_NUM_LINKS; i++) {
