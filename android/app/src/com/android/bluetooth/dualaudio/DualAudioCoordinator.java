@@ -19,6 +19,7 @@ import android.annotation.RequiresPermission;
 import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothA2dp;
 import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothCodecConfig;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
@@ -33,9 +34,11 @@ import android.util.Log;
 import com.android.bluetooth.flags.Flags;
 
 import java.lang.reflect.Method;
-import java.util.List;
-
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -52,6 +55,16 @@ public final class DualAudioCoordinator {
     private static final long FORCE_START_RETRY_INTERVAL_MS = 50L;
     private static final int FORCE_START_MAX_RETRIES = 10;
 
+    // Wk 8c — optional codec coercion. When Settings.Global.a2dp_dup_coerce_codec
+    // is 1 and any peer in the dual-audio set has a codec different from the
+    // others, coordinate a reconfig of all participants to SBC (universal A2DP
+    // baseline) so stock bta_av_dup_audio_buf works cleanly. On dual-audio
+    // disable, restore each peer to the codec type they had before coercion.
+    // Trade-off: audio briefly pauses during each peer's reconfig, and quality
+    // drops to SBC for the duration of dual audio.
+    private static final int CODEC_TYPE_SBC = 0;  // BluetoothCodecConfig.SOURCE_CODEC_TYPE_SBC
+    private static final long RECONFIG_SETTLE_MS = 1500L;
+
     private static final DualAudioCoordinator INSTANCE = new DualAudioCoordinator();
 
     public static DualAudioCoordinator getInstance() {
@@ -67,6 +80,14 @@ public final class DualAudioCoordinator {
 
     /** Peers currently tracked as secondary active. Excludes the primary. */
     private final Set<BluetoothDevice> mSecondaries = new HashSet<>();
+
+    /**
+     * Wk 8c coercion state: original A2DP codec TYPE (SBC/AAC/…) for every
+     * peer we pushed to SBC while dual audio is on. Populated at coerce
+     * time, drained by {@link #restoreCoercedCodecs}. Empty ⇔ no coercion
+     * in effect. Access guarded by {@link #mLock}.
+     */
+    private final Map<BluetoothDevice, Integer> mOriginalCodecTypes = new HashMap<>();
 
     private DualAudioCoordinator() {}
 
@@ -199,6 +220,9 @@ public final class DualAudioCoordinator {
         for (BluetoothDevice d : snapshot) {
             mNativeInterface.forceStopSecondaryPeer(d);
         }
+        // Wk 8c — if a coercion is in effect, put each peer's codec back.
+        // No-op when the map is empty (the common non-coerced path).
+        restoreCoercedCodecs();
     }
 
     /**
@@ -261,6 +285,10 @@ public final class DualAudioCoordinator {
                     adapter.closeProfileProxy(profile, proxy);
                     return;
                 }
+                // Proxy ownership: by default we close it at the end of this
+                // method. If we hand control to an async coercion callback,
+                // set keepProxy=true and the callback closes it instead.
+                boolean keepProxy = false;
                 try {
                     BluetoothA2dp a2dp = (BluetoothA2dp) proxy;
                     BluetoothDevice active = null;
@@ -279,28 +307,218 @@ public final class DualAudioCoordinator {
                     Log.i(TAG, "autoPromoteConnectedPeers: active=" + active
                             + " connected=" + connected
                             + " filter=" + filterDesc);
+
+                    List<BluetoothDevice> toPromote = new ArrayList<>();
                     for (BluetoothDevice d : connected) {
                         if (d.equals(active)) continue;
-                        // Filter semantics:
-                        //   include == null      → promote all (no filter set)
-                        //   !include.contains(x) → skip — covers the explicit
-                        //                          empty case too (empty.contains
-                        //                          is always false).
                         if (include != null && !include.contains(macSuffix(d.getAddress()))) {
                             Log.i(TAG, "autoPromoteConnectedPeers: skipping "
                                     + d + " (suffix not in include list)");
                             continue;
                         }
-                        synchronized (mLock) {
-                            mSecondaries.add(d);
-                        }
-                        boolean ok = mNativeInterface.forceStartSecondaryPeer(d);
-                        Log.i(TAG, "autoPromoteConnectedPeers: " + d
-                                + " → forceStartSecondaryPeer returned " + ok);
-                        if (!ok) {
-                            synchronized (mLock) {
-                                mSecondaries.remove(d);
+                        toPromote.add(d);
+                    }
+
+                    if (active != null && !toPromote.isEmpty()
+                            && isCoerceCodecEnabled()
+                            && hasCodecMismatch(a2dp, active, toPromote)) {
+                        Log.i(TAG, "autoPromoteConnectedPeers: codec mismatch detected, "
+                                + "coercing primary + secondaries to SBC");
+                        List<BluetoothDevice> allToCoerce = new ArrayList<>();
+                        allToCoerce.add(active);
+                        allToCoerce.addAll(toPromote);
+                        final List<BluetoothDevice> secondariesFinal = toPromote;
+                        keepProxy = true;
+                        coerceAllToSbc(a2dp, allToCoerce, () -> {
+                            for (BluetoothDevice d : secondariesFinal) {
+                                dispatchForceStart(d);
                             }
+                            adapter.closeProfileProxy(BluetoothProfile.A2DP, proxy);
+                        });
+                        return;
+                    }
+
+                    for (BluetoothDevice d : toPromote) {
+                        dispatchForceStart(d);
+                    }
+                } finally {
+                    if (!keepProxy) {
+                        adapter.closeProfileProxy(BluetoothProfile.A2DP, proxy);
+                    }
+                }
+            }
+
+            @Override public void onServiceDisconnected(int profile) {}
+        }, BluetoothProfile.A2DP);
+    }
+
+    private void dispatchForceStart(BluetoothDevice d) {
+        synchronized (mLock) {
+            mSecondaries.add(d);
+        }
+        boolean ok = mNativeInterface.forceStartSecondaryPeer(d);
+        Log.i(TAG, "dispatchForceStart: " + d
+                + " → forceStartSecondaryPeer returned " + ok);
+        if (!ok) {
+            synchronized (mLock) {
+                mSecondaries.remove(d);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Wk 8c — codec coercion helpers
+    // ------------------------------------------------------------------
+
+    private boolean isCoerceCodecEnabled() {
+        Context ctx = mContext;
+        if (ctx == null) return false;
+        try {
+            return Settings.Global.getInt(ctx.getContentResolver(),
+                    "a2dp_dup_coerce_codec", 0) == 1;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static int getCurrentCodecType(BluetoothA2dp a2dp, BluetoothDevice device) {
+        try {
+            Method m = BluetoothA2dp.class.getMethod("getCodecStatus", BluetoothDevice.class);
+            Object status = m.invoke(a2dp, device);
+            if (status == null) return -1;
+            Object cfg = status.getClass().getMethod("getCodecConfig").invoke(status);
+            if (cfg == null) return -1;
+            return (int) cfg.getClass().getMethod("getCodecType").invoke(cfg);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /**
+     * True iff any peer in {primary, secondaries} has a codec type different
+     * from the primary's — the condition that causes stock
+     * {@code bta_av_dup_audio_buf} to forward primary-encoded frames onto a
+     * stream that can't decode them.
+     */
+    private static boolean hasCodecMismatch(BluetoothA2dp a2dp,
+                                            BluetoothDevice primary,
+                                            List<BluetoothDevice> secondaries) {
+        int pt = getCurrentCodecType(a2dp, primary);
+        if (pt < 0) return false;  // unknown — don't trigger coercion blindly
+        for (BluetoothDevice s : secondaries) {
+            int st = getCurrentCodecType(a2dp, s);
+            if (st >= 0 && st != pt) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Coerce a single peer's A2DP codec to SBC via
+     * {@code setCodecConfigPreference} + a bounded settling delay.
+     * Records the original codec type in {@link #mOriginalCodecTypes} so
+     * {@link #restoreCoercedCodecs} can put it back on dual-audio disable.
+     * No-op (fast path) when the peer is already on SBC.
+     */
+    private void coerceToSbc(BluetoothA2dp a2dp, BluetoothDevice device, Runnable onDone) {
+        int current = getCurrentCodecType(a2dp, device);
+        if (current == CODEC_TYPE_SBC) {
+            Log.i(TAG, "coerceToSbc: " + device + " already SBC; skipping");
+            onDone.run();
+            return;
+        }
+        if (current >= 0) {
+            synchronized (mLock) {
+                // Don't overwrite an existing recording — first coercion wins,
+                // so restore returns to the user's actual preferred codec
+                // rather than whatever we happened to set along the way.
+                if (!mOriginalCodecTypes.containsKey(device)) {
+                    mOriginalCodecTypes.put(device, current);
+                }
+            }
+        }
+        try {
+            BluetoothCodecConfig cfg = new BluetoothCodecConfig.Builder()
+                    .setCodecType(CODEC_TYPE_SBC)
+                    .setCodecPriority(BluetoothCodecConfig.CODEC_PRIORITY_HIGHEST)
+                    .build();
+            Method m = BluetoothA2dp.class.getMethod("setCodecConfigPreference",
+                    BluetoothDevice.class, BluetoothCodecConfig.class);
+            m.invoke(a2dp, device, cfg);
+            Log.i(TAG, "coerceToSbc: dispatched on " + device
+                    + " (original codec type was " + current + ")");
+        } catch (Throwable t) {
+            Log.w(TAG, "coerceToSbc: setCodecConfigPreference failed for " + device, t);
+        }
+        mHandler.postDelayed(onDone, RECONFIG_SETTLE_MS);
+    }
+
+    /**
+     * Sequentially coerce each peer in the list to SBC, then invoke
+     * {@code finalCallback} on the main thread. Runs on {@link #mHandler} so
+     * ordering + timing are deterministic; callers may schedule force-starts
+     * inside the callback.
+     */
+    private void coerceAllToSbc(BluetoothA2dp a2dp, List<BluetoothDevice> devices,
+                                Runnable finalCallback) {
+        if (devices.isEmpty()) {
+            finalCallback.run();
+            return;
+        }
+        BluetoothDevice first = devices.get(0);
+        List<BluetoothDevice> rest = new ArrayList<>(devices.subList(1, devices.size()));
+        coerceToSbc(a2dp, first, () -> coerceAllToSbc(a2dp, rest, finalCallback));
+    }
+
+    /**
+     * Best-effort restore of every peer we coerced back to its original
+     * codec type. Called from dual-audio-disable and from adapter-off. Uses
+     * the same {@code setCodecConfigPreference} mechanism; failures are
+     * logged and the entry is still dropped (we can't un-do a call we
+     * couldn't make).
+     */
+    @SuppressLint("AndroidFrameworkRequiresPermission")
+    @RequiresPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
+    private void restoreCoercedCodecs() {
+        final Map<BluetoothDevice, Integer> snapshot;
+        synchronized (mLock) {
+            if (mOriginalCodecTypes.isEmpty()) return;
+            snapshot = new HashMap<>(mOriginalCodecTypes);
+            mOriginalCodecTypes.clear();
+        }
+        Context ctx = mContext;
+        if (ctx == null) return;
+        BluetoothManager bm = ctx.getSystemService(BluetoothManager.class);
+        if (bm == null) return;
+        final BluetoothAdapter adapter = bm.getAdapter();
+        if (adapter == null) return;
+        adapter.getProfileProxy(ctx, new BluetoothProfile.ServiceListener() {
+            @Override
+            public void onServiceConnected(int profile, BluetoothProfile proxy) {
+                if (profile != BluetoothProfile.A2DP) {
+                    adapter.closeProfileProxy(profile, proxy);
+                    return;
+                }
+                try {
+                    BluetoothA2dp a2dp = (BluetoothA2dp) proxy;
+                    Method m;
+                    try {
+                        m = BluetoothA2dp.class.getMethod("setCodecConfigPreference",
+                                BluetoothDevice.class, BluetoothCodecConfig.class);
+                    } catch (NoSuchMethodException nsme) {
+                        Log.e(TAG, "restoreCoercedCodecs: setCodecConfigPreference missing", nsme);
+                        return;
+                    }
+                    for (Map.Entry<BluetoothDevice, Integer> e : snapshot.entrySet()) {
+                        try {
+                            BluetoothCodecConfig cfg = new BluetoothCodecConfig.Builder()
+                                    .setCodecType(e.getValue())
+                                    .setCodecPriority(BluetoothCodecConfig.CODEC_PRIORITY_HIGHEST)
+                                    .build();
+                            m.invoke(a2dp, e.getKey(), cfg);
+                            Log.i(TAG, "restoreCoercedCodecs: " + e.getKey()
+                                    + " → codec type " + e.getValue());
+                        } catch (Throwable t) {
+                            Log.w(TAG, "restoreCoercedCodecs failed for " + e.getKey(), t);
                         }
                     }
                 } finally {
