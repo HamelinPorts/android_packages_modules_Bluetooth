@@ -142,6 +142,12 @@ public final class DualAudioCoordinator {
         } catch (Throwable t) {
             Log.w(TAG, "registerReceiver(SET_PEER_VOLUME) failed", t);
         }
+        try {
+            IntentFilter f = new IntentFilter(ACTION_DUMP_STATE);
+            mContext.registerReceiver(mDumpReceiver, f, Context.RECEIVER_EXPORTED);
+        } catch (Throwable t) {
+            Log.w(TAG, "registerReceiver(DUMP_STATE) failed", t);
+        }
         // Wk 9b — seed a2dp_dup_peer_volumes from AVRCP so the app's
         // sliders start at the correct position. AvrcpTargetService might
         // not be up at attach-time; seed on a short delay and again when
@@ -152,6 +158,66 @@ public final class DualAudioCoordinator {
 
     private static final String ACTION_SET_PEER_VOLUME =
             "org.lineageos.dualaudio.SET_PEER_VOLUME";
+
+    private static final String ACTION_DUMP_STATE =
+            "org.lineageos.dualaudio.DUMP_STATE";
+
+    private final BroadcastReceiver mDumpReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            dumpState();
+        }
+    };
+
+    /**
+     * Log a human-readable snapshot of coordinator state at Info level.
+     * Triggered on demand via the DUMP_STATE broadcast so operators can
+     * inspect internals without a debugger. Captures only Java-visible
+     * state (native ForcedSecondaryRegistry / PeerTxRegistry state is
+     * reflected via our own mSecondaries / mOriginalCodecTypes etc.).
+     */
+    public void dumpState() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n=== DualAudio state ===\n");
+        sb.append("  enabled:     ").append(isEnabled()).append('\n');
+        sb.append("  aconfig:     ").append(Flags.a2dpDupActive()).append('\n');
+        sb.append("  coerce mode: ").append(isCoerceCodecEnabled()).append('\n');
+        Context ctx = mContext;
+        if (ctx != null) {
+            try {
+                String members = Settings.Global.getString(
+                        ctx.getContentResolver(), "a2dp_dup_members");
+                sb.append("  members:     ")
+                        .append(members == null ? "(unset — all)" : members)
+                        .append('\n');
+                String vols = Settings.Global.getString(
+                        ctx.getContentResolver(), "a2dp_dup_peer_volumes");
+                sb.append("  pub volumes: ")
+                        .append(vols == null ? "(none)" : vols)
+                        .append('\n');
+            } catch (Throwable t) {
+                Log.w(TAG, "dumpState: Settings.Global read failed", t);
+            }
+        }
+        synchronized (mLock) {
+            sb.append("  secondaries (").append(mSecondaries.size()).append("):\n");
+            for (BluetoothDevice d : mSecondaries) {
+                sb.append("    ").append(d).append('\n');
+            }
+            sb.append("  coerced codecs (").append(mOriginalCodecTypes.size()).append("):\n");
+            for (Map.Entry<BluetoothDevice, Integer> e : mOriginalCodecTypes.entrySet()) {
+                sb.append("    ").append(e.getKey())
+                        .append(" original codec type=").append(e.getValue()).append('\n');
+            }
+            sb.append("  pub volume map (").append(mPublishedVolumes.size()).append("):\n");
+            for (Map.Entry<String, Integer> e : mPublishedVolumes.entrySet()) {
+                sb.append("    ").append(e.getKey()).append(" = ")
+                        .append(e.getValue()).append('\n');
+            }
+        }
+        sb.append("=======================");
+        Log.i(TAG, sb.toString());
+    }
 
     private final BroadcastReceiver mVolumeReceiver = new BroadcastReceiver() {
         @Override
