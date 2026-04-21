@@ -362,7 +362,12 @@ public final class DualAudioCoordinator {
      */
     private final Map<String, Integer> mPublishedVolumes = new HashMap<>();
 
-    private void recordPeerVolume(BluetoothDevice device, int volume) {
+    /**
+     * Record a new per-peer volume and publish to the provider so the app
+     * UI can reflect it. Called from both local writes (setPeerVolume)
+     * and the AVRCP storeVolumeForDevice hook (peer-initiated changes).
+     */
+    public void recordPeerVolume(BluetoothDevice device, int volume) {
         if (device == null) return;
         String mac = device.getAddress();
         if (mac == null || mac.isEmpty()) return;

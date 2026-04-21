@@ -233,6 +233,11 @@ class AvrcpVolumeManager extends AudioDeviceCallback {
         // Always use apply() since it is asynchronous, otherwise the call can hang waiting for
         // storage to be written.
         getVolumeMap().edit().putInt(device.getAddress(), newVolume).apply();
+        // dual-A2DP overlay hook: forward to the DualAudioCoordinator so the
+        // app UI slider reflects peer-initiated VolumeChanged (and our own
+        // writes — idempotent there). No-op if the coordinator isn't up.
+        com.android.bluetooth.dualaudio.DualAudioCoordinator.getInstance()
+                .recordPeerVolume(device, newVolume);
     }
 
     /**
