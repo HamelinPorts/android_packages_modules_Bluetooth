@@ -136,16 +136,26 @@ public final class DualAudioCoordinator {
         // per-peer volume changes. The app can't call AvrcpVolumeManager
         // directly (package-private + wrong process); it sends us a
         // broadcast and we relay.
+        // Cross-process entry points for the BluetoothDualAudio app are
+        // gated by the signature-level permission the app declares. Only
+        // callers with the same signing certificate (i.e., platform-signed
+        // system components and the app itself) pass the check — 3rd-party
+        // apps are rejected by the broadcast dispatcher without ever
+        // reaching onReceive(). Broken: shell testing via adb am broadcast
+        // (adb shell lacks the platform signature); use the app UI or a
+        // platform-signed test helper.
         try {
             IntentFilter f = new IntentFilter(ACTION_SET_PEER_VOLUME);
-            mContext.registerReceiver(mVolumeReceiver, f, Context.RECEIVER_EXPORTED);
+            mContext.registerReceiver(mVolumeReceiver, f,
+                    CONTROL_PERMISSION, mHandler, Context.RECEIVER_EXPORTED);
             Log.i(TAG, "registered SET_PEER_VOLUME receiver");
         } catch (Throwable t) {
             Log.w(TAG, "registerReceiver(SET_PEER_VOLUME) failed", t);
         }
         try {
             IntentFilter f = new IntentFilter(ACTION_DUMP_STATE);
-            mContext.registerReceiver(mDumpReceiver, f, Context.RECEIVER_EXPORTED);
+            mContext.registerReceiver(mDumpReceiver, f,
+                    CONTROL_PERMISSION, mHandler, Context.RECEIVER_EXPORTED);
         } catch (Throwable t) {
             Log.w(TAG, "registerReceiver(DUMP_STATE) failed", t);
         }
@@ -162,6 +172,9 @@ public final class DualAudioCoordinator {
 
     private static final String ACTION_DUMP_STATE =
             "org.lineageos.dualaudio.DUMP_STATE";
+
+    private static final String CONTROL_PERMISSION =
+            "org.lineageos.dualaudio.permission.CONTROL";
 
     private final BroadcastReceiver mDumpReceiver = new BroadcastReceiver() {
         @Override
@@ -270,26 +283,36 @@ public final class DualAudioCoordinator {
     // Wk 9b — publish per-peer volume to Settings.Global so the app UI
     // (separate process) can show the real current value on its slider.
     //
-    // Schema: Settings.Global.a2dp_dup_peer_volumes = "MAC:vol,MAC:vol,..."
-    // MAC is uppercase canonical form; vol is the system-level volume
+    // Schema: Settings.Global.a2dp_dup_peer_volumes = "SUFFIX:vol,SUFFIX:vol,..."
+    // SUFFIX is the last 5 chars of the MAC (e.g. "AA:3D") — the only
+    // portion that's invariant across Android's per-process MAC
+    // anonymization. vol is the system-level volume
     // (0..AvrcpVolumeManager.mDeviceMaxVolume, typically 0..15).
+    //
+    // Why suffix only: Settings.Global is world-readable by any app with
+    // no permission required. Writing full MACs there leaks the user's
+    // paired BT device identifiers to every installed app. The suffix is
+    // enough for the app UI to match its own BluetoothDevice entries
+    // (both sides agree on the last 5 chars).
     //
     // Covered update sources:
     //   1. setPeerVolume (local write from the app slider)
     //   2. seedFromAvrcp (called once we have an AvrcpTargetService —
     //      scrapes getRememberedVolumeForDevice per bonded A2DP peer).
-    // Not yet covered (Wk 9c): peer-initiated VolumeChanged from a
-    //   non-active peer. That needs a hook in AvrcpVolumeManager's
+    // Not yet covered: peer-initiated VolumeChanged from a non-active
+    //   peer. That needs a hook in AvrcpVolumeManager's
     //   storeVolumeForDevice path — ~1 extra AOSP hook point.
     // ------------------------------------------------------------------
 
+    /** Map keyed by mac suffix (last 5 chars, e.g. "AA:3D"). */
     private final Map<String, Integer> mPublishedVolumes = new HashMap<>();
 
     private void recordPeerVolume(BluetoothDevice device, int volume) {
         if (device == null) return;
+        String suffix = macSuffix(device.getAddress());
+        if (suffix.isEmpty()) return;
         synchronized (mLock) {
-            mPublishedVolumes.put(
-                    device.getAddress().toUpperCase(java.util.Locale.US), volume);
+            mPublishedVolumes.put(suffix, volume);
         }
         flushPeerVolumesToSettings();
     }
@@ -330,8 +353,9 @@ public final class DualAudioCoordinator {
                 for (BluetoothDevice d : btAdapter.getBondedDevices()) {
                     int v = svc.getRememberedVolumeForDevice(d);
                     if (v >= 0) {
-                        mPublishedVolumes.put(
-                                d.getAddress().toUpperCase(java.util.Locale.US), v);
+                        String suffix = macSuffix(d.getAddress());
+                        if (suffix.isEmpty()) continue;
+                        mPublishedVolumes.put(suffix, v);
                         count++;
                     }
                 }
