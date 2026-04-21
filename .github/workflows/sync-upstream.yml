@@ -1,0 +1,134 @@
+name: Sync dual-a2dp with upstream LineageOS
+
+# What this does:
+#   Weekly, fetches upstream LineageOS/android_packages_modules_Bluetooth
+#   (lineage-23.2 branch) and tries to rebase our dual-a2dp branch onto
+#   it. If the rebase is clean, force-push-with-lease to origin; if it
+#   conflicts, abort and open a GitHub issue so a human can resolve.
+#
+# Note on scheduled-workflow behavior:
+#   GitHub only fires scheduled workflows from the REPO'S DEFAULT BRANCH.
+#   Make sure `dual-a2dp` is set as the default branch of this fork
+#   (Settings → Branches → Default branch), OR copy this file into
+#   whatever branch IS the default.
+#
+# Manual trigger also works via the "Actions" tab → "Run workflow".
+
+on:
+  schedule:
+    # Every Monday 06:00 UTC. Early enough to react Mon morning if LOS
+    # lands a large A2DP/AVRCP refactor over the weekend.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# Single in-flight run per branch so a manual-trigger-during-scheduled
+# doesn't create two conflicting force-push attempts.
+concurrency:
+  group: sync-upstream-dual-a2dp
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # to force-push-with-lease
+  issues: write     # to open a conflict report
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dual-a2dp
+        uses: actions/checkout@v4
+        with:
+          ref: dual-a2dp
+          # Full history so rebase has all the merge-base data.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/LineageOS/android_packages_modules_Bluetooth.git
+          git fetch upstream lineage-23.2 --depth=1000
+
+      - name: Check whether upstream has anything new
+        id: diverge
+        run: |
+          BASE=$(git merge-base HEAD upstream/lineage-23.2)
+          TIP=$(git rev-parse upstream/lineage-23.2)
+          if [ "$BASE" = "$TIP" ]; then
+            echo "already_up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "Branch is already on tip of upstream/lineage-23.2; nothing to do."
+          else
+            COUNT=$(git rev-list --count "$BASE".."$TIP")
+            echo "already_up_to_date=false" >> "$GITHUB_OUTPUT"
+            echo "new_commits=$COUNT" >> "$GITHUB_OUTPUT"
+            echo "Upstream has $COUNT new commit(s) since our base."
+          fi
+
+      - name: Attempt rebase
+        id: rebase
+        if: steps.diverge.outputs.already_up_to_date != 'true'
+        continue-on-error: true
+        run: |
+          git rebase upstream/lineage-23.2
+
+      - name: Capture conflict report on failure
+        if: >-
+          steps.diverge.outputs.already_up_to_date != 'true' &&
+          steps.rebase.outcome == 'failure'
+        id: conflict
+        run: |
+          # Collect conflict summary before aborting.
+          {
+            echo "### Files with conflicts"
+            git diff --name-only --diff-filter=U | sed 's/^/- /'
+            echo ""
+            echo "### Current rebase-apply state"
+            git status --short || true
+          } > /tmp/conflict.md
+          git rebase --abort || true
+          {
+            echo 'body<<EOF'
+            cat /tmp/conflict.md
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Push clean rebase
+        if: >-
+          steps.diverge.outputs.already_up_to_date != 'true' &&
+          steps.rebase.outcome == 'success'
+        run: |
+          git push --force-with-lease origin dual-a2dp
+          echo "Pushed rebased dual-a2dp (${{ steps.diverge.outputs.new_commits }} upstream commit(s) absorbed)."
+
+      - name: Open issue on conflict
+        if: >-
+          steps.diverge.outputs.already_up_to_date != 'true' &&
+          steps.rebase.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today = new Date().toISOString().slice(0, 10);
+            const body = `Automatic rebase of \`dual-a2dp\` onto \`upstream/lineage-23.2\` on ${today} hit conflicts.
+
+            ${{ steps.conflict.outputs.body }}
+
+            Resolve locally:
+            \`\`\`sh
+            git fetch upstream
+            git checkout dual-a2dp
+            git rebase upstream/lineage-23.2
+            # fix conflicts, git add, git rebase --continue
+            git push --force-with-lease origin dual-a2dp
+            \`\`\`
+            `;
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Weekly rebase: conflicts with upstream (${today})`,
+              body: body,
+              labels: ['rebase-conflict']
+            });
