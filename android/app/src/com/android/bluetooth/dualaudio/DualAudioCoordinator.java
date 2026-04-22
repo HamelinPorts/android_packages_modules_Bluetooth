@@ -391,6 +391,74 @@ public final class DualAudioCoordinator {
         }
     }
 
+    /**
+     * Wk 9d — entry point for the native upcall from
+     * com_android_bluetooth_dual_audio.cpp. Arrives on the BT AVRCP
+     * thread; we convert the raw AVRCP volume (0-127) to the system
+     * stream scale and hop to our main Handler before touching
+     * coordinator state.
+     *
+     * No-op when the address can't be resolved into a BluetoothDevice
+     * (adapter down, unbonded, etc.) — peer-initiated volume is a
+     * best-effort UI hint, never required for correctness.
+     */
+    public void onAvrcpPeerVolume(byte[] addressBytes, int avrcpVolume) {
+        if (addressBytes == null || addressBytes.length != 6) return;
+        BluetoothDevice device = bluetoothDeviceFromBytes(addressBytes);
+        if (device == null) return;
+        final int systemVolume = avrcpToSystemVolume(avrcpVolume);
+        final BluetoothDevice d = device;
+        mHandler.post(() -> recordPeerVolume(d, systemVolume));
+    }
+
+    private BluetoothDevice bluetoothDeviceFromBytes(byte[] addr) {
+        Context ctx = mContext;
+        if (ctx == null) return null;
+        BluetoothManager bm = ctx.getSystemService(BluetoothManager.class);
+        if (bm == null) return null;
+        BluetoothAdapter btAdapter = bm.getAdapter();
+        if (btAdapter == null) return null;
+        String mac = String.format(java.util.Locale.US,
+                "%02X:%02X:%02X:%02X:%02X:%02X",
+                addr[0] & 0xFF, addr[1] & 0xFF, addr[2] & 0xFF,
+                addr[3] & 0xFF, addr[4] & 0xFF, addr[5] & 0xFF);
+        try {
+            return btAdapter.getRemoteDevice(mac);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static final int AVRCP_MAX_VOL = 127;
+
+    /**
+     * AVRCP absolute volume (0-127) → system STREAM_MUSIC scale
+     * (0 - getStreamMaxVolume). Mirrors
+     * {@link com.android.bluetooth.avrcp.AvrcpVolumeManager#avrcpToSystemVolume}
+     * which is package-private.
+     */
+    private int avrcpToSystemVolume(int avrcpVolume) {
+        if (avrcpVolume < 0) avrcpVolume = 0;
+        if (avrcpVolume > AVRCP_MAX_VOL) avrcpVolume = AVRCP_MAX_VOL;
+        int streamMax = 15;
+        Context ctx = mContext;
+        if (ctx != null) {
+            try {
+                android.media.AudioManager am = ctx.getSystemService(
+                        android.media.AudioManager.class);
+                if (am != null) {
+                    streamMax = am.getStreamMaxVolume(
+                            android.media.AudioManager.STREAM_MUSIC);
+                }
+            } catch (Throwable t) {
+                // AudioManager unavailable → fall back to the typical
+                // streamMax=15. Slider accuracy will still be close
+                // enough on most devices.
+            }
+        }
+        return (int) Math.round((double) avrcpVolume * streamMax / AVRCP_MAX_VOL);
+    }
+
     @SuppressLint("AndroidFrameworkRequiresPermission")
     @RequiresPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
     public void seedPeerVolumesFromAvrcp() {

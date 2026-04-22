@@ -65,4 +65,22 @@ void OnPrimaryStarted(const RawAddress& primary);
 bt_status_t ForceStartSecondaryPeer(const RawAddress& peer);
 bt_status_t ForceStopSecondaryPeer(const RawAddress& peer);
 
+// Wk 9d — peer-initiated AVRCP volume plumbing.
+//
+// Called from system/profile/avrcp/device.cc HandleVolumeChanged for a
+// non-active peer (where stock Fluoride drops the event because its
+// AvrcpTargetService.setVolume path has no device parameter). Forwards
+// the raw AVRCP volume (0-127) to the Java coordinator so the app UI's
+// per-peer slider reflects the peer-initiated change. No-op when the
+// feature is disabled or the upcall has not been installed yet.
+//
+// Thread-safe: invoked from the Bluetooth main thread; the upcall
+// attaches to the JavaVM as needed.
+using PeerVolumeUpcallFn = void (*)(const RawAddress& peer, int avrcp_volume);
+void NotifyPeerVolume(const RawAddress& peer, int avrcp_volume);
+// Installed once at JNI registration time by
+// com_android_bluetooth_dual_audio.cpp. Passing nullptr tears down the
+// route (e.g. at cleanup); NotifyPeerVolume then becomes a no-op.
+void SetPeerVolumeUpcall(PeerVolumeUpcallFn fn);
+
 }  // namespace bluetooth::dual_audio

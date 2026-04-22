@@ -32,6 +32,7 @@
 #include <com_android_bluetooth_flags.h>
 #include <hardware/bluetooth.h>
 
+#include <atomic>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -249,6 +250,28 @@ bt_status_t ForceStopSecondaryPeer(const RawAddress& peer) {
   log::info("ForceStopSecondaryPeer({}) : dispatching suspend", peer);
   btif_av_source_request_suspend_stream(peer);
   return BT_STATUS_SUCCESS;
+}
+
+// Wk 9d — upcall pointer installed by the JNI layer. std::atomic so the
+// avrcp thread can read without holding a lock while JNI-register time
+// stores it once. Null in host unit tests that don't link the JNI
+// translation unit → NotifyPeerVolume becomes a no-op, matching the
+// stock "ignore non-active volume" behavior they test against.
+static std::atomic<PeerVolumeUpcallFn> g_peer_volume_upcall{nullptr};
+
+void SetPeerVolumeUpcall(PeerVolumeUpcallFn fn) {
+  g_peer_volume_upcall.store(fn, std::memory_order_release);
+}
+
+void NotifyPeerVolume(const RawAddress& peer, int avrcp_volume) {
+  if (!Enabled()) {
+    return;
+  }
+  auto fn = g_peer_volume_upcall.load(std::memory_order_acquire);
+  if (fn == nullptr) {
+    return;
+  }
+  fn(peer, avrcp_volume);
 }
 
 }  // namespace bluetooth::dual_audio

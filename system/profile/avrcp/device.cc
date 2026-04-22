@@ -26,6 +26,7 @@
 #include "array_utils.h"
 #include "avrcp_common.h"
 #include "btif/include/btif_av.h"
+#include "btif/include/dual_audio_bridge.h"
 #include "internal_include/stack_config.h"
 #include "packet/avrcp/avrcp_reject_packet.h"
 #include "packet/avrcp/general_reject_packet.h"
@@ -577,6 +578,16 @@ void Device::HandleVolumeChanged(uint8_t label,
   }
 
   if (!IsActive()) {
+    // Wk 9d — stock Fluoride drops VolumeChanged from non-active peers
+    // because its Java AvrcpTargetService.setVolume path has no device
+    // argument (everything is credited to the active device). Hand the
+    // raw AVRCP volume to the dual-audio overlay so the app's per-peer
+    // slider still reflects peer-initiated changes. No-op when the
+    // overlay is disabled.
+    int8_t non_active_vol = pkt->GetVolume();
+    non_active_vol &= ~0x80;  // remove RFA bit
+    bluetooth::dual_audio::NotifyPeerVolume(address_,
+                                            static_cast<int>(non_active_vol));
     log::verbose("Ignoring volume changes from non active device");
     return;
   }

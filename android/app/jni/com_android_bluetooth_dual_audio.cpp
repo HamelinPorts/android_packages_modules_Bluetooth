@@ -25,6 +25,60 @@ namespace android {
 
 static std::shared_timed_mutex dual_audio_interface_mutex;
 
+// Wk 9d — native→Java upcall for peer-initiated AVRCP VolumeChanged
+// events that Fluoride drops at device.cc:HandleVolumeChanged. Cached
+// at JNI registration time so it works from the AVRCP thread without
+// a per-call FindClass.
+static JavaVM* g_vm = nullptr;
+static jclass g_native_interface_class = nullptr;
+static jmethodID g_mid_on_peer_volume_changed = nullptr;
+
+// Runs on the Bluetooth AVRCP thread. Attaches to the VM if needed,
+// shuttles the MAC + raw AVRCP volume up to a static Java method, and
+// detaches. Any pending JNI exception is logged and cleared so we
+// never take the AVRCP thread down over a Java-side slip.
+static void PeerVolumeUpcallImpl(const RawAddress& peer, int avrcp_volume) {
+  if (g_vm == nullptr || g_native_interface_class == nullptr ||
+      g_mid_on_peer_volume_changed == nullptr) {
+    return;
+  }
+  JNIEnv* env = nullptr;
+  bool attached = false;
+  if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+    if (g_vm->AttachCurrentThread(&env, nullptr) != 0 || env == nullptr) {
+      return;
+    }
+    attached = true;
+  }
+
+  jbyteArray addr = env->NewByteArray(6);
+  if (addr == nullptr) {
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+    }
+    if (attached) {
+      g_vm->DetachCurrentThread();
+    }
+    return;
+  }
+  env->SetByteArrayRegion(
+          addr, 0, 6,
+          reinterpret_cast<const jbyte*>(peer.address.data()));
+  env->CallStaticVoidMethod(g_native_interface_class,
+                            g_mid_on_peer_volume_changed, addr,
+                            static_cast<jint>(avrcp_volume));
+  if (env->ExceptionCheck()) {
+    error("onPeerVolumeChangedNative threw — clearing");
+    env->ExceptionDescribe();
+    env->ExceptionClear();
+  }
+  env->DeleteLocalRef(addr);
+
+  if (attached) {
+    g_vm->DetachCurrentThread();
+  }
+}
+
 static jboolean forceStartSecondaryPeerNative(JNIEnv* env, jobject /* object */,
                                               jbyteArray address) {
   std::shared_lock<std::shared_timed_mutex> lock(dual_audio_interface_mutex);
@@ -83,6 +137,36 @@ static jboolean isPeerInOpenStateNative(JNIEnv* env, jobject /* object */,
 }
 
 int register_com_android_bluetooth_dual_audio(JNIEnv* env) {
+  // Wk 9d — cache the JavaVM + static callback method so
+  // device.cc → btif_av_dual → PeerVolumeUpcallImpl can upcall from the
+  // AVRCP thread without a per-call FindClass. NewGlobalRef keeps the
+  // jclass alive past this scope.
+  env->GetJavaVM(&g_vm);
+  jclass local = env->FindClass(
+          "com/android/bluetooth/dualaudio/DualAudioNativeInterface");
+  if (local == nullptr) {
+    error("FindClass(DualAudioNativeInterface) returned null — "
+          "peer-volume upcall disabled");
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+    }
+  } else {
+    g_native_interface_class = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    g_mid_on_peer_volume_changed = env->GetStaticMethodID(
+            g_native_interface_class, "onPeerVolumeChangedNative", "([BI)V");
+    if (g_mid_on_peer_volume_changed == nullptr) {
+      error("GetStaticMethodID(onPeerVolumeChangedNative) returned null — "
+            "peer-volume upcall disabled");
+      if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+      }
+    } else {
+      bluetooth::dual_audio::SetPeerVolumeUpcall(&PeerVolumeUpcallImpl);
+      info("peer-volume upcall installed");
+    }
+  }
+
   const JNINativeMethod methods[] = {
           {"forceStartSecondaryPeerNative", "([B)Z",
            (void*)forceStartSecondaryPeerNative},
